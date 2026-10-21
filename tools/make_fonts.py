@@ -12,10 +12,11 @@ FONT_DIR = sys.argv[1] if len(sys.argv) > 1 else "/usr/share/fonts/opentype/inte
 OUT = os.path.join(os.path.dirname(__file__), "..", "src", "fonts.h")
 
 TEXT = "".join(chr(c) for c in range(0x20, 0x7F)) + "ÄÖÜäöüß°·µ€§´–…"
-NUM = " 0123456789,.-+°%CHVglmp/"
+NUM = " 0123456789,.-+°%CHVWghklmp/"
 
 # Name, Datei, Pixelgroesse, Zeichen
 FONTS = [
+    ("FONT_XS", "Inter-Medium.otf",          16, TEXT),   # Einheiten (W, kWh), kleine Beschriftungen
     ("FONT_S",  "Inter-Medium.otf",          20, TEXT),   # kleine Hinweise
     ("FONT_T",  "Inter-Medium.otf",          26, TEXT),   # Titel, Kopfzeile, Zusatzzeilen
     ("FONT_B",  "Inter-SemiBold.otf",        32, TEXT),   # Tasten, Dialoge

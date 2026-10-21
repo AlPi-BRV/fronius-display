@@ -1,0 +1,13 @@
+{
+  "name": "Fronius-Display __SIZE__ Zoll",
+  "version": "__VERSION__",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "firmware/fronius-display-__SIZE__zoll-full.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

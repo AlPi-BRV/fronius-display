@@ -1,0 +1,123 @@
+name: Firmware bauen
+
+# Baut die Firmware, sobald auf GitHub ein Release veroeffentlicht wird
+# (Tag z. B. v0.1.0), haengt sie an das Release und aktualisiert die
+# Web-Flash-Seite. Von Hand startbar unter "Actions".
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  push:
+    branches: ['dev*']     # Entwicklungszweige: nur bauen, nichts veroeffentlichen
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio/libdeps
+          key: pio2-${{ hashFiles('platformio.ini') }}
+
+      - name: PlatformIO installieren
+        run: pip install platformio "esptool==4.8.1"
+
+      - name: Firmware bauen
+        run: |
+          set -o pipefail
+          if ! pio run -e crowpanel5 -e crowpanel7 2>&1 | tee build.log; then
+            # Compilerfehler als Hinweise am Lauf sichtbar machen
+            grep -iE "error|fail|\*\*\*|not found|no such" build.log | grep -v "^Compiling" | tail -10 | while read -r l; do echo "::error::${l:0:400}"; done
+            tail -n 10 build.log | while read -r l; do echo "::warning::${l:0:400}"; done
+            exit 1
+          fi
+          grep -E "^(RAM|Flash):" build.log | while read -r l; do echo "::notice::$l"; done
+
+      - name: Version pruefen
+        run: |
+          VERSION=$(grep -oP '#define FW_VERSION\s+"\K[^"]+' src/main.cpp)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # Tag darf "v0.3.1" oder "0.3.1" heissen
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "${GITHUB_REF_NAME#v}" != "$VERSION" ]]; then
+            echo "Tag $GITHUB_REF_NAME passt nicht zu FW_VERSION $VERSION in src/main.cpp"
+            exit 1
+          fi
+
+      - name: Dateien zusammenstellen
+        run: |
+          # Jede Datei traegt die Displaygroesse im Namen (5zoll / 7zoll);
+          # die Update-Suche am Display nimmt nur Dateien der eigenen Groesse.
+          BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32 -name boot_app0.bin | head -n 1)
+          mkdir -p site/firmware release
+          for SIZE in 5 7; do
+            B=.pio/build/crowpanel$SIZE
+            N=fronius-display-${SIZE}zoll
+            python -m esptool --chip esp32s3 merge_bin \
+              -o site/firmware/$N-full.bin \
+              --flash_mode keep --flash_freq keep --flash_size keep \
+              0x0 $B/bootloader.bin \
+              0x8000 $B/partitions.bin \
+              0xe000 "$BOOT_APP0" \
+              0x10000 $B/firmware.bin
+            OTA=ota
+            cp $B/firmware.bin site/firmware/$N-$OTA.bin
+            cp site/firmware/$N-full.bin  release/$N-$VERSION-full.bin
+            cp site/firmware/$N-$OTA.bin  release/$N-$VERSION-$OTA.bin
+            sed -e "s/__VERSION__/$VERSION/" -e "s/__SIZE__/$SIZE/g" docs/manifest.json > site/manifest-${SIZE}zoll.json
+          done
+          # manifest.json ohne Groesse zeigt auf das 5"
+          cp site/manifest-5zoll.json site/manifest.json
+          cp docs/index.html site/
+          ls -l release
+
+      - name: Testdateien 5 Zoll (Entwicklungszweig)
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fronius-display-5zoll-${{ env.VERSION }}-test
+          path: release/fronius-display-5zoll-*
+          retention-days: 14
+
+      - name: Testdateien 7 Zoll (Entwicklungszweig)
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fronius-display-7zoll-${{ env.VERSION }}-test
+          path: release/fronius-display-7zoll-*
+          retention-days: 14
+
+      - name: Release anlegen
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Fronius-Display ${{ env.VERSION }}
+          files: release/*.bin
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'push'
+        with:
+          path: site
+
+  pages:
+    needs: build
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
