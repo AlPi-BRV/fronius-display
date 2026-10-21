@@ -440,6 +440,12 @@ static double jd(JsonVariantConst v) {
   return v.as<double>();
 }
 
+// Text aus JSON; fehlt das Feld, leerer Text (nicht "null")
+static String js(JsonVariantConst v) {
+  const char* p = v.as<const char*>();
+  return p ? String(p) : String();
+}
+
 static String fmt(float v, int nachkomma) {
   if (isnan(v)) return "--";
   char buf[16];
@@ -544,20 +550,20 @@ static bool fetchJson(const String& host, const char* path, JsonDocument& doc) {
 static bool readPowerFlow(const String& host, FlowData& n) {
   JsonDocument doc(&intAlloc);
   if (!fetchJson(host, "/solar_api/v1/GetPowerFlowRealtimeData.fcgi", doc)) return false;
-  JsonObjectConst d = doc["Body"]["Data"];
+  JsonObjectConst d = doc["Body"]["Data"].as<JsonObjectConst>();
   if (d.isNull()) return false;
-  JsonObjectConst site = d["Site"];
+  JsonObjectConst site = d["Site"].as<JsonObjectConst>();
   n.pPv   = jd(site["P_PV"]);
   n.pAkku = jd(site["P_Akku"]);
   n.pGrid = jd(site["P_Grid"]);
   n.pLoad = jd(site["P_Load"]);
-  n.battStandby = site["BatteryStandby"] | false;
+  n.battStandby = site["BatteryStandby"].as<bool>();
   n.eInvTotal = NAN;
   for (JsonPairConst kv : d["Inverters"].as<JsonObjectConst>()) {
-    JsonObjectConst inv = kv.value();
+    JsonObjectConst inv = kv.value().as<JsonObjectConst>();
     double soc = jd(inv["SOC"]);
     if (!isnan(soc)) { n.soc = soc; n.hasBatt = true; }
-    n.battMode = inv["Battery_Mode"] | "";
+    n.battMode = js(inv["Battery_Mode"]);
     double e = jd(inv["E_Total"]);
     if (!isnan(e)) n.eInvTotal = isnan(n.eInvTotal) ? e : n.eInvTotal + e;
   }
@@ -565,20 +571,20 @@ static bool readPowerFlow(const String& host, FlowData& n) {
   n.nSec = 0;
   for (JsonPairConst kv : d["SecondaryMeters"].as<JsonObjectConst>()) {
     if (n.nSec >= 4) break;
-    JsonObjectConst m = kv.value();
+    JsonObjectConst m = kv.value().as<JsonObjectConst>();
     SecMeter& s = n.sec[n.nSec++];
-    s.label = m["Label"] | "";
+    s.label = js(m["Label"]);
     s.p = jd(m["P"]);
     double loc = jd(m["MLoc"]);
     s.loc = isnan(loc) ? -1 : (int)lround(loc);
-    String cat = m["Category"] | "";
+    String cat = js(m["Category"]);
     s.gen = cat == "METER_CAT_WR";
     if (!s.label.length()) s.label = s.gen ? "Wechselrichter" : "Zähler";
   }
   n.nOhm = 0;
   for (JsonPairConst kv : d["Smartloads"]["Ohmpilots"].as<JsonObjectConst>()) {
     if (n.nOhm >= 2) break;
-    JsonObjectConst o = kv.value();
+    JsonObjectConst o = kv.value().as<JsonObjectConst>();
     n.ohmP[n.nOhm] = jd(o["P_AC_Total"]);
     n.ohmTemp[n.nOhm] = jd(o["Temperature"]);
     n.nOhm++;
@@ -595,12 +601,12 @@ static bool isGenLoc(const FlowData& f, int loc) {
 static bool readMeters(const String& host, const FlowData& f, MeterData& n) {
   JsonDocument doc(&intAlloc);
   if (!fetchJson(host, "/solar_api/v1/GetMeterRealtimeData.cgi?Scope=System", doc)) return false;
-  JsonObjectConst d = doc["Body"]["Data"];
+  JsonObjectConst d = doc["Body"]["Data"].as<JsonObjectConst>();
   if (d.isNull()) return false;
   double eGen = 0;
   bool anyGen = false;
   for (JsonPairConst kv : d) {
-    JsonObjectConst m = kv.value();
+    JsonObjectConst m = kv.value().as<JsonObjectConst>();
     double locD = jd(m["Meter_Location_Current"]);
     int loc = isnan(locD) ? -1 : (int)lround(locD);
     if (loc == 0 && !n.valid) {                 // Einspeisepunkt (Netz)
@@ -615,7 +621,7 @@ static bool readMeters(const String& host, const FlowData& f, MeterData& n) {
       n.freq = jd(m["Frequency_Phase_Average"]);
       n.eImp = jd(m["EnergyReal_WAC_Sum_Consumed"]);
       n.eExp = jd(m["EnergyReal_WAC_Sum_Produced"]);
-      n.model = m["Details"]["Model"] | "";
+      n.model = js(m["Details"]["Model"]);
       n.valid = !isnan(n.eImp) && !isnan(n.eExp);
     } else if (isGenLoc(f, loc)) {             // weiterer Wechselrichter (z. B. Hoymiles)
       double e = jd(m["EnergyReal_WAC_Sum_Produced"]);
