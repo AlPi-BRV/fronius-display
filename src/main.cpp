@@ -1009,10 +1009,13 @@ static void drawDotsOn(const FlowLine& l) {
   }
 }
 
+// Werte aktuell? Nach 3 fehlgeschlagenen Abrufen grau, Punkte stehen
+static bool online() { return flow.valid && failCount < 3; }
+
 static void nodeLabel(int i, float watt, const String& sub, uint16_t subCol) {
   String n, u;
   powerParts(watt, n, u);
-  numUnit(n, u, NODE_X[i], NODE_Y[i] + 34, 0, fT, fXS, flow.valid ? C_TEXT : C_DIM);
+  numUnit(n, u, NODE_X[i], NODE_Y[i] + 34, 0, fT, fXS, online() ? C_TEXT : C_DIM);
   if (sub.length()) {
     useFont(fXS);
     text(sub, NODE_X[i], NODE_Y[i] + R_OUT + 14, subCol, MC_DATUM);
@@ -1029,11 +1032,12 @@ static void drawFlow() {
   float scaleNet = fmaxf(scalePv, 10000.0f);
   uint16_t gcol = gridColor();
 
-  // Leitungen (unter den Ringen)
-  setupLine(N_PV, pv, true, C_SUN, scalePv);
-  setupLine(N_LOAD, load, false, C_ACC_BLUE, scaleNet);
-  setupLine(N_GRID, flow.pGrid, !isnan(flow.pGrid) && flow.pGrid > 0, gcol, scaleNet);
-  setupLine(N_BATT, flow.hasBatt ? flow.pAkku : NAN, !isnan(flow.pAkku) && flow.pAkku > 0, C_ACC_GRN,
+  // Leitungen (unter den Ringen); ohne aktuelle Daten kein Fluss
+  bool on = online();
+  setupLine(N_PV, on ? pv : NAN, true, C_SUN, scalePv);
+  setupLine(N_LOAD, on ? load : NAN, false, C_ACC_BLUE, scaleNet);
+  setupLine(N_GRID, on ? flow.pGrid : NAN, !isnan(flow.pGrid) && flow.pGrid > 0, gcol, scaleNet);
+  setupLine(N_BATT, (on && flow.hasBatt) ? flow.pAkku : NAN, !isnan(flow.pAkku) && flow.pAkku > 0, C_ACC_GRN,
             fmaxf(battWh ? battWh / 2.0f : 5000.0f, 3000.0f));
 
   // Mitte: Wechselrichter
@@ -1063,7 +1067,7 @@ static void drawFlow() {
   int bx = NODE_X[N_BATT], by = NODE_Y[N_BATT];
   if (flow.hasBatt) {
     numUnit(isnan(flow.soc) ? String("--") : String((int)lroundf(flow.soc)), "%", bx, by + 34, 0, fT, fXS,
-            flow.valid ? C_TEXT : C_DIM);
+            online() ? C_TEXT : C_DIM);
     String bsub = "Batterie";
     if (!isnan(flow.pAkku) && fabsf(flow.pAkku) >= FLOW_MIN_W)
       bsub = (flow.pAkku < 0 ? "lädt " : "entlädt ") + powerText(flow.pAkku);
@@ -1136,7 +1140,6 @@ static void drawFlowHeader() {
   int wx = 800 - M - 20;
   drawWifi(wx, HEAD / 2 + 12, wifiBars());
   int xr = wx - 34;
-  bool online = flow.valid && failCount < 3;
   String uz = uhrzeit();
   useFont(fT);
   if (millis() < toastUntil) {
@@ -1144,7 +1147,7 @@ static void drawFlowHeader() {
     text(toastText, xr, HEAD / 2, toastColor, MR_DATUM);
   } else if (WiFi.status() != WL_CONNECTED) {
     text("WLAN getrennt", xr, HEAD / 2, C_ACC_ORG, MR_DATUM);
-  } else if (!online) {
+  } else if (!online()) {
     text("Wechselrichter nicht erreichbar", xr, HEAD / 2, C_ACC_ORG, MR_DATUM);
   } else {
     text(uz, xr, HEAD / 2, C_DIM, MR_DATUM);
