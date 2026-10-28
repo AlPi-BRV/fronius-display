@@ -38,12 +38,20 @@ jobs:
       - name: Firmware bauen
         run: |
           set -o pipefail
-          if ! pio run -e crowpanel5 -e crowpanel7 2>&1 | tee build.log; then
-            # Compilerfehler als Hinweise am Lauf sichtbar machen
-            grep -iE "error|fail|\*\*\*|not found|no such" build.log | grep -v "^Compiling" | tail -10 | while read -r l; do echo "::error::${l:0:400}"; done
-            tail -n 10 build.log | while read -r l; do echo "::warning::${l:0:400}"; done
-            exit 1
-          fi
+          # Jede Groesse einzeln. Ohne Cache baut PlatformIO beim ersten Lauf die
+          # Arduino-Bibliotheken neu und stolpert dabei gelegentlich ueber den eigenen
+          # Build-Ordner (.sconsign...tmp fehlt). Ein zweiter Versuch geht dann durch.
+          : > build.log
+          for E in crowpanel5 crowpanel7; do
+            if ! pio run -e $E 2>&1 | tee -a build.log; then
+              echo "::warning::$E: erster Versuch fehlgeschlagen – zweiter Versuch"
+              if ! pio run -e $E 2>&1 | tee -a build.log; then
+                # Compilerfehler als Hinweise am Lauf sichtbar machen
+                grep -iE "error|fail|\*\*\*|not found|no such" build.log | grep -v "^Compiling" | tail -10 | while read -r l; do echo "::error::${l:0:400}"; done
+                exit 1
+              fi
+            fi
+          done
           grep -E "^(RAM|Flash):" build.log | while read -r l; do echo "::notice::$l"; done
 
       - name: Version pruefen
