@@ -7,8 +7,8 @@ Das Display holt sich die Werte per WLAN direkt vom Wechselrichter (Fronius Sola
 > **Kein offizielles Produkt von Fronius.** Bei Fragen zum Display bitte hier im
 > Repository ein Issue anlegen, nicht bei Fronius. Nutzung auf eigene Gefahr.
 
-> **Status: 0.1.x – erste Testversionen.** Die Firmware baut für 5" und 7" und ist mit
-> echten Daten eines GEN24 abgeglichen, läuft aber noch nicht lange auf einem Display.
+> **Status: 0.1.x – erste Testversionen.** Läuft auf dem 5" an einem Symo GEN24 mit
+> BYD-Batterie und zusätzlichem Hoymiles-Wechselrichter.
 
 ## Installation
 
@@ -19,11 +19,36 @@ Das Display holt sich die Werte per WLAN direkt vom Wechselrichter (Fronius Sola
 Danach öffnet das Display die Einstellungen: WLAN wählen, im Reiter **Fronius** die IP
 des Wechselrichters eintragen, *Speichern*.
 
-## Vorschau
+## Bilder
 
-![Energiefluss](docs/images/vorschau-energiefluss.png)
+![Energiefluss](docs/images/energiefluss.jpg)
 
-*Entwurf der Startseite (gerendert, Beispielwerte)*
+*Startseite auf dem 5" – Energiefluss und Tageswerte*
+
+| Photovoltaik | Netz mit Phasen |
+|---|---|
+| ![Photovoltaik](docs/images/pv.jpg) | ![Netz](docs/images/netz.jpg) |
+
+| Batterie | Verbraucher |
+|---|---|
+| ![Batterie](docs/images/batterie.jpg) | ![Verbraucher](docs/images/verbraucher.jpg) |
+
+<details>
+<summary>Einstellungen (Bilder)</summary>
+
+| Fronius | WLAN |
+|---|---|
+| ![Einstellungen Fronius](docs/images/einstellungen-fronius.jpg) | ![WLAN](docs/images/wlan.jpg) |
+
+| IP | Anzeige |
+|---|---|
+| ![IP](docs/images/ip.jpg) | ![Anzeige](docs/images/anzeige.jpg) |
+
+| System | |
+|---|---|
+| ![System](docs/images/system.jpg) | |
+
+</details>
 
 ## Funktionen
 
