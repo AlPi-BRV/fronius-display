@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.0"
+#define FW_VERSION  "0.1.1"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -254,11 +254,30 @@ struct MeterData {
   String model;
 };
 
-static FlowData  flow;
-static MeterData meter;
+// Batteriespeicher (GetStorageRealtimeData) – aendert sich langsam, darum selten abfragen
+struct StorageData {
+  bool   valid = false;
+  float  capWh = NAN;              // nutzbare Kapazitaet laut Speicher (Capacity_Maximum)
+  float  designWh = NAN;           // Nennkapazitaet (DesignedCapacity)
+  float  tempC = NAN;              // Zelltemperatur
+  float  voltDc = NAN;
+  String model;                    // z. B. "BYD Battery-Box Premium HV"
+};
+
+static FlowData    flow;
+static MeterData   meter;
+static StorageData storage;
+static uint32_t    nextStorageFetch = 0;
 static uint32_t  lastPoll = 0;
 static int       failCount = 0;
 static int       lastHttp = 0;     // letzter HTTP-Code (fuer Meldungen)
+
+// Batteriekapazitaet in Wh: vom Speicher gemeldet, sonst aus den Einstellungen (0 = unbekannt)
+static float battCapWh() {
+  if (storage.valid && !isnan(storage.capWh) && storage.capWh > 100) return storage.capWh;
+  return (float)battWh;
+}
+static bool battCapAuto() { return storage.valid && !isnan(storage.capWh) && storage.capWh > 100; }
 
 // Abgeleitete Momentanwerte
 static float pvGenW() {            // weitere Wechselrichter (Smart Meter, Kategorie WR)
@@ -633,12 +652,39 @@ static bool readMeters(const String& host, const FlowData& f, MeterData& n) {
   return true;
 }
 
+static bool readStorage(const String& host, StorageData& n) {
+  JsonDocument doc(&intAlloc);
+  if (!fetchJson(host, "/solar_api/v1/GetStorageRealtimeData.cgi?Scope=System", doc)) return false;
+  // erster Speicher; mehrere Module (z. B. 2 x BYD) meldet der Controller zusammen
+  for (JsonPairConst kv : doc["Body"]["Data"].as<JsonObjectConst>()) {
+    JsonObjectConst c = kv.value()["Controller"].as<JsonObjectConst>();
+    if (c.isNull()) continue;
+    n.capWh    = jd(c["Capacity_Maximum"]);
+    n.designWh = jd(c["DesignedCapacity"]);
+    n.tempC    = jd(c["Temperature_Cell"]);
+    n.voltDc   = jd(c["Voltage_DC"]);
+    n.model    = js(c["Details"]["Model"]);
+    n.model.trim();
+    if (!n.model.length()) n.model = js(c["Details"]["Manufacturer"]);
+    n.valid = true;
+    return true;
+  }
+  return false;
+}
+
 static bool pollFronius() {
   FlowData f;
   if (!readPowerFlow(froniusHost, f)) return false;
   MeterData m;
   if (readMeters(froniusHost, f, m)) meter = m;   // ohne Smart Meter geht der Energiefluss trotzdem
   flow = f;
+  // Speicher: nach dem Start, dann jede Minute (nur wenn eine Batterie da ist)
+  if (f.hasBatt && millis() >= nextStorageFetch) {
+    StorageData sd;
+    bool ok = readStorage(froniusHost, sd);
+    if (ok) storage = sd;
+    nextStorageFetch = millis() + (ok ? 60000UL : 10UL * 60000UL);
+  }
   dayUpdate();
   return true;
 }
@@ -1038,7 +1084,7 @@ static void drawFlow() {
   setupLine(N_LOAD, on ? load : NAN, false, C_ACC_BLUE, scaleNet);
   setupLine(N_GRID, on ? flow.pGrid : NAN, !isnan(flow.pGrid) && flow.pGrid > 0, gcol, scaleNet);
   setupLine(N_BATT, (on && flow.hasBatt) ? flow.pAkku : NAN, !isnan(flow.pAkku) && flow.pAkku > 0, C_ACC_GRN,
-            fmaxf(battWh ? battWh / 2.0f : 5000.0f, 3000.0f));
+            fmaxf(battCapWh() > 0 ? battCapWh() / 2.0f : 5000.0f, 3000.0f));
 
   // Mitte: Wechselrichter
   canvas.drawCircle(CX, CY, R_CENTER, C_DIM);
@@ -1290,6 +1336,7 @@ static void drawDetailGrid() {
 }
 
 static void drawDetailBatt() {
+  float cap = battCapWh();
   boxTitle(R_DL, "Jetzt", C_ACC_GRN);
   int y = R_DL.y + 76;
   y = detailRow(R_DL, y, "Ladestand", isnan(flow.soc) ? String("--") : fmt(flow.soc, 1), "%", C_TEXT);
@@ -1303,32 +1350,41 @@ static void drawDetailBatt() {
   if (!isnan(flow.pAkku) && fabsf(flow.pAkku) >= FLOW_MIN_W) pname = flow.pAkku < 0 ? "Lädt mit" : "Entlädt mit";
   y = detailPower(R_DL, y, pname, flow.pAkku);
   y = detailRow(R_DL, y, "Betrieb", battModeText(flow.battMode), "");
-  if (battWh) {
-    float drin = isnan(flow.soc) ? NAN : battWh * flow.soc / 100.0f;
+  if (cap > 0) {
+    float drin = isnan(flow.soc) ? NAN : cap * flow.soc / 100.0f;
     String n, u;
     energyParts(drin, n, u);
     y = detailRow(R_DL, y, "Energie im Speicher", n, u);
     // grobe Restzeit bei aktueller Leistung
     if (!isnan(flow.pAkku) && fabsf(flow.pAkku) >= 100 && !isnan(flow.soc)) {
-      float h = flow.pAkku > 0 ? drin / flow.pAkku : (battWh - drin) / -flow.pAkku;
+      float h = flow.pAkku > 0 ? drin / flow.pAkku : (cap - drin) / -flow.pAkku;
       String d = dauerText(h);
       if (d.length()) y = detailRow(R_DL, y, flow.pAkku > 0 ? "Leer in ca." : "Voll in ca.", d, "");
     }
   }
 
-  boxTitle(R_DR, "Heute", C_ACC_GRN);
-  y = R_DR.y + 76;
-  y = detailEnergy(R_DR, y, "Geladen", today.battIn);
-  y = detailEnergy(R_DR, y, "Entladen", today.battOut);
-  if (battWh) {
-    String n, u;
-    energyParts((float)battWh, n, u);
-    y = detailRow(R_DR, y, "Kapazität", n, u);
+  boxTitle(R_DR, "Speicher", C_ACC_GRN);
+  if (storage.model.length()) {
+    fitFont(storage.model, R_DR.w - 150, &fXS);
+    text(storage.model, R_DR.x + R_DR.w - 18, R_DR.y + 26, C_DIM, MR_DATUM);
   }
+  y = R_DR.y + 76;
+  if (cap > 0) {
+    String n, u;
+    energyParts(cap, n, u);
+    y = detailRow(R_DR, y, battCapAuto() ? "Kapazität" : "Kapazität (eingestellt)", n, u);
+  }
+  if (storage.valid) {
+    y = detailRow(R_DR, y, "Zelltemperatur", fmt(storage.tempC, 0), "°C");
+    y = detailRow(R_DR, y, "Spannung", fmt(storage.voltDc, 0), "V");
+  }
+  y = detailEnergy(R_DR, y, "Heute geladen", today.battIn);
+  y = detailEnergy(R_DR, y, "Heute entladen", today.battOut);
   useFont(fXS);
-  text("Leistung × Zeit, solange das Display läuft.", R_DR.x + 18, R_DR.y + R_DR.h - 52, C_DIM, ML_DATUM);
-  if (!battWh)
-    text("Kapazität einstellen: Zahnrad > Fronius", R_DR.x + 18, R_DR.y + R_DR.h - 28, C_DIM, ML_DATUM);
+  if (cap <= 0)
+    text("Kapazität einstellen: Zahnrad > Fronius", R_DR.x + 18, R_DR.y + R_DR.h - 22, C_DIM, ML_DATUM);
+  else
+    text("Heute: Leistung × Zeit, solange das Display läuft.", R_DR.x + 18, R_DR.y + R_DR.h - 22, C_DIM, ML_DATUM);
 }
 
 static void drawDetail() {
@@ -1684,7 +1740,9 @@ static void drawSettingsBody() {
     useFont(fXS);
     int y = R_TEST.y + R_TEST.h + 22;
     text("PV-Leistung: Vollausschlag des PV-Rings (z. B. 13.3)", M + 4, y, C_DIM, ML_DATUM);
-    text("Batterie: Kapazität für Restzeit (leer = unbekannt)", M + 4, y + 22, C_DIM, ML_DATUM);
+    text(battCapAuto() ? "Batterie: meldet " + fmt(storage.capWh / 1000.0f, 1) + " kWh – Feld kann leer bleiben"
+                       : String("Batterie: nur nötig, wenn der Speicher nichts meldet"),
+         M + 4, y + 22, C_DIM, ML_DATUM);
     text("Solar API am Wechselrichter einschalten!", M + 4, y + 44, C_DIM, ML_DATUM);
     drawPad();
   } else if (edTab == 1) {
