@@ -294,9 +294,11 @@ static float loadW() {
   if (!flow.valid || isnan(flow.pLoad)) return NAN;
   return fabsf(flow.pLoad);
 }
-// Hinweis: Ob der GEN24 einen weiteren Wechselrichter (Smart Meter, Kategorie WR)
-// schon in P_PV oder P_Load einrechnet, ist noch zu pruefen (Werte bei Sonne
-// mit Solar.web vergleichen). Alles dazu steckt in pvGenW/pvTotalW/loadW.
+// Geprueft am GEN24 (28.10.2026, Sonne): P_PV enthaelt NUR den Fronius (DC-Seite),
+// ein weiterer Wechselrichter am Smart Meter (Kategorie WR, z. B. Hoymiles) muss
+// dazugerechnet werden. P_Load ist der echte Hausverbrauch, der weitere
+// Wechselrichter steckt dort schon richtig drin (Bilanz geht bis auf die
+// Wandlungsverluste auf; Fronius rechnet den Eigenverbrauch genauso).
 
 // ---------------------------------------------------------------
 // Tageswerte – der GEN24 liefert keine E_Day-Werte, darum selbst rechnen:
