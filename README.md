@@ -7,8 +7,17 @@ Das Display holt sich die Werte per WLAN direkt vom Wechselrichter (Fronius Sola
 > **Kein offizielles Produkt von Fronius.** Bei Fragen zum Display bitte hier im
 > Repository ein Issue anlegen, nicht bei Fronius. Nutzung auf eigene Gefahr.
 
-> **Status: 0.1.0 in Entwicklung** – die Firmware baut für 5" und 7", ist aber noch nicht
-> auf einem Display getestet. Noch kein Release, daher auch noch kein Web-Installer.
+> **Status: 0.1.x – erste Testversionen.** Die Firmware baut für 5" und 7" und ist mit
+> echten Daten eines GEN24 abgeglichen, läuft aber noch nicht lange auf einem Display.
+
+## Installation
+
+1. Display per USB-C anschließen.
+2. **[Web-Installer öffnen](https://alpi-brv.github.io/fronius-display/)** in Chrome oder Edge.
+3. Den Knopf für **deine Größe** klicken (5" oder 7"), Anschluss wählen – fertig.
+
+Danach öffnet das Display die Einstellungen: WLAN wählen, im Reiter **Fronius** die IP
+des Wechselrichters eintragen, *Speichern*.
 
 ## Vorschau
 
