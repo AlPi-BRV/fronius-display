@@ -7,6 +7,8 @@ Das Display holt sich die Werte per WLAN direkt vom Wechselrichter (Fronius Sola
 > **Kein offizielles Produkt von Fronius.** Bei Fragen zum Display bitte hier im
 > Repository ein Issue anlegen, nicht bei Fronius. Nutzung auf eigene Gefahr.
 
+💬 **Diskussion:** [Thread im Photovoltaikforum](https://www.photovoltaikforum.com/thread/265604-eigenst%C3%A4ndiges-touch-display-f%C3%BCr-fronius-gen24-open-source-ohne-server/)
+
 > **Status: 0.1.x – erste Testversionen.** Läuft auf dem 5" an einem Symo GEN24 mit
 > BYD-Batterie und zusätzlichem Hoymiles-Wechselrichter.
 
