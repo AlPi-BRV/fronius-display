@@ -19,7 +19,7 @@ Das Display holt sich die Werte per WLAN direkt vom Wechselrichter (Fronius Sola
 ## Funktionen
 
 - **Energiefluss** wie in Solar.web: PV, Verbraucher, Netz und Batterie als Segmentringe
-  um den Wechselrichter, laufende Punkte zeigen die Flussrichtung
+  um den Wechselrichter; Pfeile (oder auf Wunsch laufende Punkte) zeigen die Flussrichtung
 - **Antippen öffnet Details:**
   - PV – Aufteilung je Wechselrichter (z. B. GEN24 + zusätzlicher Wechselrichter
     über Fronius Smart Meter), später Strings über Modbus
@@ -51,9 +51,12 @@ Der GEN24 liefert keine Tageswerte (`E_Day` ist leer). Das Display rechnet selbs
 |---|---|---|
 | Netzbezug, Einspeisung | Zählerstände des Smart Meters am Netzanschluss | genau |
 | Weitere Wechselrichter (z. B. Hoymiles) | Zählerstand ihres Smart Meters | genau |
-| PV des Fronius, Verbrauch, Batterie | Leistung × Zeit, solange das Display läuft | Näherung |
+| Verbrauch, Autarkie | Zähler: Wechselrichter + weitere WR + Bezug − Einspeisung | genau |
+| PV des Fronius, Batterie geladen/entladen | Leistung × Zeit, solange das Display läuft | Näherung |
 
-Die Stände des Tagesbeginns werden im Flash gesichert und überstehen Neustarts und Updates.
+Die Stände des Tagesbeginns werden alle 5 Minuten im Flash gesichert und überstehen
+Stromausfall, Neustart und Updates. Die zählerbasierten Werte stimmen auch, wenn das
+Display zwischendurch aus war; bei den Näherungswerten fehlt die Zeit ohne Strom.
 Startet das Display mitten am Tag zum ersten Mal, zeigt „Heute“ die Werte *seit* dieser Uhrzeit.
 
 ## Voraussetzungen am Wechselrichter
@@ -79,7 +82,7 @@ Erscheint dort JSON, ist alles bereit.
 | Fronius | IP des Wechselrichters, PV-Leistung (kWp), Batterie (kWh), *Verbindung testen* |
 | WLAN | Netz suchen und wählen, WLAN-Passwort |
 | IP | Automatisch (DHCP) oder feste IP |
-| Anzeige | Ausrichtung (normal / 180° gedreht), laufende Punkte ein/aus |
+| Anzeige | Ausrichtung (normal / 180° gedreht), Flussrichtung als Pfeile oder laufende Punkte |
 | System | Abfrageintervall (2 s bis 1 min), Update, Helligkeit & Kontrast, Werkseinstellungen |
 
 ## Hardware

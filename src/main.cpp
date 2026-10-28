@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.1"
+#define FW_VERSION  "0.1.2"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -83,7 +83,7 @@
 #define ANIM_FRAME_MS 40            // laufende Punkte: ca. 25 Bilder pro Sekunde
 #endif
 #ifndef DAY_SAVE_MS
-#define DAY_SAVE_MS (10UL * 60UL * 1000UL)   // Tageswerte alle 10 min sichern
+#define DAY_SAVE_MS (5UL * 60UL * 1000UL)    // Tageswerte alle 5 min sichern
 #endif
 
 #define NVS_NS "fronidisp"
@@ -169,7 +169,7 @@ static uint32_t pollMs     = POLL_INTERVAL_MS;
 static uint32_t pvMaxW     = 0;       // installierte PV-Leistung in W (0 = nicht eingestellt)
 static uint32_t battWh     = 0;       // Batteriekapazitaet in Wh (0 = unbekannt)
 static bool     rot180     = false;   // Ausrichtung: um 180° gedreht
-static bool     animOn     = true;    // laufende Punkte
+static bool     animOn     = false;   // Energiefluss: false = Pfeile, true = laufende Punkte
 static uint8_t  brightPct  = BRIGHT_DEFAULT_PCT;
 static uint8_t  contrastLvl = CONTRAST_DEFAULT;
 static String   fwUpdatedFrom;
@@ -197,7 +197,7 @@ static void loadSettings() {
   pvMaxW     = prefs.getUInt("pvmax", 0);
   battWh     = prefs.getUInt("battwh", 0);
   rot180     = prefs.getBool("rot180", false);
-  animOn     = prefs.getBool("anim", true);
+  animOn     = prefs.getBool("anim2", false);
   brightPct  = prefs.getUChar("bright", BRIGHT_DEFAULT_PCT);
   if (brightPct < 10 || brightPct > 100) brightPct = BRIGHT_DEFAULT_PCT;
   contrastLvl = prefs.getUChar("contrast", CONTRAST_DEFAULT);
@@ -357,6 +357,12 @@ static void computeToday() {
   t.pvGen = (meter.genValid && !isnan(dayS.eGen)) ? (float)(meter.eGen - dayS.eGen) : 0;
   if (!isnan(flow.eInvTotal) && !isnan(dayS.eInv)) t.invCounter = (float)(flow.eInvTotal - dayS.eInv);
   t.pv = t.pvFr + t.pvGen;
+  // Verbrauch aus Zaehlerstaenden (stimmt auch, wenn das Display zwischendurch aus war):
+  //   Haus = Wechselrichter (AC) + weitere Wechselrichter + Netzbezug - Einspeisung
+  if (!isnan(t.invCounter) && !isnan(t.imp)) {
+    float l = t.invCounter + t.pvGen + t.imp - t.exp;
+    if (l >= 0) t.load = l;
+  }
   if (t.load > 1 && !isnan(t.imp)) t.autarkie = constrain((1.0f - t.imp / t.load) * 100.0f, 0.0f, 100.0f);
   if (t.pv > 1 && !isnan(t.exp)) t.eigen = constrain((1.0f - t.exp / t.pv) * 100.0f, 0.0f, 100.0f);
   t.valid = true;
@@ -1048,12 +1054,32 @@ static void setupLine(int i, float watt, bool toCenter, uint16_t col, float scal
   canvas.drawWideLine(l.x0, l.y0, l.x1, l.y1, 1.5f, act ? mix565(C_BG, col, 0.45f) : C_LINE);
 }
 
+// Laufende Punkte: klein und dicht, damit die Bewegung ruhig wirkt
+static const int DOTS = 5;
 static void drawDotsOn(const FlowLine& l) {
-  for (int k = 0; k < 3; k++) {
-    float t = fmodf(k / 3.0f + l.phase, 1.0f);
+  for (int k = 0; k < DOTS; k++) {
+    float t = fmodf((float)k / DOTS + l.phase, 1.0f);
     if (!l.toCenter) t = 1.0f - t;
     float x = l.x0 + (l.x1 - l.x0) * t, y = l.y0 + (l.y1 - l.y0) * t;
-    canvas.fillSmoothCircle((int)lroundf(x), (int)lroundf(y), 5, l.col);
+    canvas.fillSmoothCircle((int)lroundf(x), (int)lroundf(y), 3, l.col);
+  }
+}
+
+// Ruhige Darstellung: zwei feste Pfeile (Winkel) in Flussrichtung
+static void drawArrowsOn(const FlowLine& l) {
+  float dx = l.x1 - l.x0, dy = l.y1 - l.y0;
+  float len = sqrtf(dx * dx + dy * dy);
+  float ux = dx / len, uy = dy / len;
+  if (!l.toCenter) { ux = -ux; uy = -uy; }
+  for (float t : { 0.33f, 0.67f }) {
+    float cx = l.x0 + dx * t, cy = l.y0 + dy * t;
+    float tipX = cx + ux * 6, tipY = cy + uy * 6;
+    // zwei Schenkel, je 35° zur Gegenrichtung
+    for (int sgn : { -1, 1 }) {
+      float a = 0.61f * sgn;
+      float bx = -(ux * cosf(a) - uy * sinf(a)), by = -(ux * sinf(a) + uy * cosf(a));
+      canvas.drawWideLine(tipX, tipY, tipX + bx * 11, tipY + by * 11, 1.6f, l.col);
+    }
   }
 }
 
@@ -1795,9 +1821,9 @@ static void drawSettingsBody() {
     useFont(fT);
     text("Energiefluss", M + 6, optBtn(1, 0).y + 16, C_TEXT, ML_DATUM);
     useFont(fXS);
-    text("laufende Punkte", M + 6, optBtn(1, 0).y + 44, C_DIM, ML_DATUM);
-    button(optBtn(1, 0), "Ruhig", !edAnim);
-    button(optBtn(1, 1), "Bewegt", edAnim);
+    text("Flussrichtung", M + 6, optBtn(1, 0).y + 44, C_DIM, ML_DATUM);
+    button(optBtn(1, 0), "Pfeile", !edAnim);
+    button(optBtn(1, 1), "Laufende Punkte", edAnim);
     useFont(fXS);
     text("Ausrichtung gilt sofort – Bild und Touch drehen sich mit.", M + 6, 480 - M - 10, C_DIM, BL_DATUM);
   } else {
@@ -1911,7 +1937,7 @@ static void saveSettings() {
   prefs.putString("gw", ipGw);
   prefs.putString("dns", ipDns);
   prefs.putUInt("poll", pollMs);
-  prefs.putBool("anim", animOn);
+  prefs.putBool("anim2", animOn);
   prefs.end();
   Serial.printf("Einstellungen gespeichert: Fronius %s, WLAN %s, IP %s\n", froniusHost.c_str(),
                 wifiSsid.c_str(), ipFixed ? ipAddr.c_str() : "DHCP");
@@ -2095,6 +2121,9 @@ static void draw() {
     baseValid = true;
     for (FlowLine& l : lines) if (l.active && animOn) drawDotsOn(l);
   }
+  if (screen == SCR_FLOW && confirmAct == A_NONE && !animOn) {
+    for (FlowLine& l : lines) if (l.active) drawArrowsOn(l);
+  }
   pushAll();
   needRedraw = false;
 }
@@ -2106,7 +2135,7 @@ static void animFrame(float dtS) {
   const uint16_t* bb = (const uint16_t*)base.getBuffer();
   for (FlowLine& l : lines) {
     if (!l.active) continue;
-    l.phase = fmodf(l.phase + dtS * l.speed / 3.0f, 1.0f);   // ein Punktabstand = 1/3
+    l.phase = fmodf(l.phase + dtS * l.speed / DOTS, 1.0f);   // ein Punktabstand = 1/DOTS
     Rect r = lineBox(l);
     if (r.x < 0) { r.w += r.x; r.x = 0; }
     if (r.y < 0) { r.h += r.y; r.y = 0; }
