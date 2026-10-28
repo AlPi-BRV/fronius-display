@@ -136,6 +136,20 @@ Erscheint dort JSON, ist alles bereit.
 Beide Größen brauchen **jeweils eigene Firmware** – jede Datei trägt die Größe im Namen
 (`fronius-display-5zoll-…` / `fronius-display-7zoll-…`).
 
+### Anderes Display?
+
+Du hast ein anderes ESP32-Display – eine andere CrowPanel-Größe, die „Advance“-Reihe,
+eine ältere Board-Revision oder ein Display eines anderen Herstellers – und möchtest die
+Firmware darauf nutzen? Dann leg bitte ein **[Issue](https://github.com/AlPi-BRV/fronius-display/issues/new?template=anderes-display.yml)**
+an und häng ein **Foto der Rückseite der Platine** an. Gut lesbar sollten sein:
+
+- Aufdruck mit **Modell / SKU** und **Board-Revision** (z. B. „V3.0“)
+- der **Chip** (z. B. „ESP32-S3-WROOM-1-N4R8“)
+- die **Steckverbinder** und **Taster** (USB, BOOT, RESET, SD-Karte)
+
+Dazu der **Link zum Produkt** (Shop oder Hersteller-Wiki). Damit lässt sich meist abschätzen,
+ob das Display passt und was angepasst werden müsste.
+
 ## Selbst bauen (PlatformIO)
 
 Wie beim Pool-Display: Ordner in VS Code mit PlatformIO öffnen, unten die Umgebung
