@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.3"
+#define FW_VERSION  "0.1.4"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -680,21 +680,94 @@ static bool readStorage(const String& host, StorageData& n) {
   return false;
 }
 
-static bool pollFronius() {
+// ---------------------------------------------------------------
+// Abfrage im Hintergrund (zweiter Prozessorkern)
+// Die Anfragen an den Wechselrichter dauern je nach Geraet bis zu einigen
+// Sekunden. Liefen sie in loop(), waere das Display so lange taub fuer
+// Beruehrungen. Darum holt ein eigener Task die Daten und legt sie in
+// "pending" ab; loop() uebernimmt sie, sobald sie da sind.
+//   netMx  – immer nur ein Netzzugriff gleichzeitig (Abfrage, Test, Update, WLAN-Suche)
+//   dataMx – Uebergabe der Daten und der Wechselrichter-Adresse
+// ---------------------------------------------------------------
+struct PollResult {
+  bool ok = false;
   FlowData f;
-  if (!readPowerFlow(froniusHost, f)) return false;
+  bool meterOk = false;
   MeterData m;
-  if (readMeters(froniusHost, f, m)) meter = m;   // ohne Smart Meter geht der Energiefluss trotzdem
-  flow = f;
-  // Speicher: nach dem Start, dann jede Minute (nur wenn eine Batterie da ist)
-  if (f.hasBatt && millis() >= nextStorageFetch) {
-    StorageData sd;
-    bool ok = readStorage(froniusHost, sd);
-    if (ok) storage = sd;
-    nextStorageFetch = millis() + (ok ? 60000UL : 10UL * 60000UL);
+  bool storOk = false;
+  StorageData st;
+};
+static SemaphoreHandle_t netMx = nullptr;
+static SemaphoreHandle_t dataMx = nullptr;
+static PollResult        pending;
+static volatile bool     pendingNew = false;
+static volatile bool     pollPaused = false;   // in den Einstellungen keine Abfrage
+static volatile bool     pollNow = false;      // sofort abfragen (nach dem Start, nach Speichern)
+
+struct NetLock {
+  NetLock() { if (netMx) xSemaphoreTake(netMx, portMAX_DELAY); }
+  ~NetLock() { if (netMx) xSemaphoreGive(netMx); }
+};
+
+static String hostCopy() {
+  if (dataMx) xSemaphoreTake(dataMx, portMAX_DELAY);
+  String h = froniusHost;
+  if (dataMx) xSemaphoreGive(dataMx);
+  return h;
+}
+
+// Alle Abfragen nacheinander; der Speicher nur jede Minute
+static void fetchAll(const String& host, PollResult& r) {
+  NetLock lock;
+  r.ok = readPowerFlow(host, r.f);
+  if (!r.ok) return;
+  r.meterOk = readMeters(host, r.f, r.m);       // ohne Smart Meter geht der Energiefluss trotzdem
+  if (r.f.hasBatt && millis() >= nextStorageFetch) {
+    r.storOk = readStorage(host, r.st);
+    nextStorageFetch = millis() + (r.storOk ? 60000UL : 10UL * 60000UL);
   }
-  dayUpdate();
-  return true;
+}
+
+// Ergebnis uebernehmen (nur aus loop() bzw. dem Haupt-Task)
+static void applyPoll(const PollResult& r) {
+  if (r.ok) {
+    flow = r.f;
+    if (r.meterOk) meter = r.m;
+    if (r.storOk) storage = r.st;
+    failCount = 0;
+    dayUpdate();
+  } else {
+    failCount++;
+  }
+  lastPoll = millis();
+  needRedraw = true;
+}
+
+static void pollTask(void*) {
+  uint32_t last = 0;
+  for (;;) {
+    bool due = pollNow || last == 0 || millis() - last >= pollMs;
+    String host = hostCopy();
+    if (!pollPaused && due && host.length() && WiFi.status() == WL_CONNECTED) {
+      pollNow = false;
+      last = millis();
+      PollResult r;
+      fetchAll(host, r);
+      xSemaphoreTake(dataMx, portMAX_DELAY);
+      pending = r;
+      pendingNew = true;
+      xSemaphoreGive(dataMx);
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
+// Sofort abfragen und warten (Speichern der Einstellungen); true = erreichbar
+static bool pollFronius() {
+  PollResult r;
+  fetchAll(hostCopy(), r);
+  applyPoll(r);
+  return r.ok;
 }
 
 // ---------------------------------------------------------------
@@ -756,6 +829,7 @@ static bool fetchLatest(JsonDocument& doc) {
 
 static bool checkForUpdate() {
   if (WiFi.status() != WL_CONNECTED) { updateErr = "kein WLAN"; return false; }
+  NetLock lock;
   JsonDocument doc;
   if (!fetchLatest(doc)) {
     delay(1500);
@@ -817,6 +891,8 @@ static void doOta() {
     }
   }
   daySave();                                   // Tageswerte vor dem Neustart sichern
+  pollPaused = true;
+  NetLock lock;
   baseValid = false;
   otaProgressScreen(-1, "Installiere Update " + updateVersion + " ...");
   WiFiClientSecure client;
@@ -1600,6 +1676,7 @@ static void openSettings(int tab) {
 
 static void scanWifi() {
   showMessage("Suche WLAN-Netze ...");
+  NetLock lock;
   if (WiFi.status() != WL_CONNECTED) { WiFi.disconnect(); delay(300); }
   int n = WiFi.scanNetworks();
   if (n <= 0) {
@@ -1912,7 +1989,9 @@ static void saveSettings() {
                     (edIpFixed && (edVal[5] != ipAddr || edVal[6] != ipMask || edVal[7] != ipGw ||
                                    edVal[8] != ipDns));
   bool hostChanged = edVal[0] != froniusHost;
+  if (dataMx) xSemaphoreTake(dataMx, portMAX_DELAY);
   froniusHost = edVal[0];
+  if (dataMx) xSemaphoreGive(dataMx);
   pvMaxW = pv;
   battWh = bat;
   wifiSsid = edVal[3];
@@ -1958,13 +2037,11 @@ static void saveSettings() {
   if (WiFi.status() != WL_CONNECTED) connectWifi(15000);
   showMessage("Teste Verbindung zum Wechselrichter ...");
   if (pollFronius()) {
-    failCount = 0;
     toast("Gespeichert – Wechselrichter erreichbar", C_ACC_GRN, 5000);
   } else {
     failCount = 3;
     toast("Gespeichert – Wechselrichter NICHT erreichbar", C_ACC_ORG, 8000);
   }
-  lastPoll = millis();
   needRedraw = true;
 }
 
@@ -1989,7 +2066,12 @@ static void testConnection() {
   h.trim();
   showMessage("Prüfe Verbindung ...");
   FlowData f;
-  if (readPowerFlow(h, f)) {
+  bool ok;
+  {
+    NetLock lock;
+    ok = readPowerFlow(h, f);
+  }
+  if (ok) {
     String s = "Wechselrichter erreichbar – PV " + powerText(f.pPv);
     if (f.hasBatt && !isnan(f.soc)) s += ", Batterie " + String((int)lroundf(f.soc)) + " %";
     toast(s, C_ACC_GRN, 8000);
@@ -2025,7 +2107,7 @@ static void settingsTap(int x, int y) {
       return;
     }
   }
-  if (hit(R_CANCEL, x, y)) { screen = SCR_FLOW; return; }
+  if (hit(R_CANCEL, x, y)) { screen = SCR_FLOW; pollNow = true; return; }
   if (hit(R_SAVE, x, y))   { saveSettings(); return; }
 
   if (edTab == 0 || (edTab == 2 && edIpFixed)) {
@@ -2323,20 +2405,24 @@ void setup() {
           sizeof(ntpGw));
   configTzTime(TIMEZONE, ntpGw, "pool.ntp.org", "time.google.com");
 
+  // Abfrage-Task auf Kern 0 (loop() laeuft auf Kern 1)
+  netMx = xSemaphoreCreateMutex();
+  dataMx = xSemaphoreCreateMutex();
+  pollNow = true;
+  xTaskCreatePinnedToCore(pollTask, "poll", 12288, nullptr, 1, nullptr, 0);
+
   lastTouchMs = millis();
+  lastPoll = millis();
   if (WiFi.status() != WL_CONNECTED) {
     openSettings(1);
     toast("WLAN nicht verbunden", C_ACC_ORG, 8000);
-    lastPoll = millis();
     return;
   }
   if (froniusHost.length() == 0) {
     openSettings(0);
-    lastPoll = millis();
     return;
   }
   showMessage("Lese Wechselrichter ...");
-  lastPoll = millis() - pollMs;
   if (fwUpdatedFrom.length())
     toast("Firmware aktualisiert: " + fwUpdatedFrom + " > " FW_VERSION, C_ACC_GRN, 15000);
 }
@@ -2344,12 +2430,15 @@ void setup() {
 void loop() {
   handleTouch();
 
-  // Abfrage im eingestellten Intervall (nicht waehrend der Einstellungen – blockiert sonst die Tastatur)
-  if (screen != SCR_SETTINGS && millis() - lastPoll >= pollMs) {
-    lastPoll = millis();
-    if (pollFronius()) failCount = 0;
-    else failCount++;
-    needRedraw = true;
+  // Abfrage laeuft im Hintergrund; hier nur die Ergebnisse uebernehmen.
+  // In den Einstellungen pausiert sie (WLAN-Suche, Tests).
+  pollPaused = (screen == SCR_SETTINGS);
+  if (pendingNew) {
+    xSemaphoreTake(dataMx, portMAX_DELAY);
+    PollResult r = pending;
+    pendingNew = false;
+    xSemaphoreGive(dataMx);
+    applyPoll(r);
   }
 
   // Kopfzeile (Uhrzeit, WLAN) regelmaessig auffrischen

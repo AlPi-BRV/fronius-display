@@ -168,6 +168,7 @@ static void setBrightness(uint8_t v) { ledcWrite(BL_PIN, v); }
 static uint8_t gtAddr = 0x5D;
 static bool    gtOk = false;
 static bool    lastDown = false;
+static uint32_t lastDataMs = 0;  // wann der GT911 zuletzt neue Daten gemeldet hat
 static int32_t lastX = 0, lastY = 0;
 
 static void pcaWrite(uint8_t reg, uint8_t val) {
@@ -218,12 +219,17 @@ static void touchBegin() {
 // true, solange ein Finger auf dem Display liegt
 static bool getTouch(int32_t* x, int32_t* y) {
   if (!gtOk) return false;
+  // Solange ein Finger aufliegt, meldet der GT911 laufend neue Daten (ca. 100 pro s).
+  // Kommt laenger nichts, gilt der Finger als losgelassen – sonst bleibt ein
+  // "Loslassen", das waehrend einer laengeren Pause (z. B. Abfrage) verpasst
+  // wurde, fuer immer als gedrueckt haengen.
   uint8_t st = 0;
-  if (!gtRead(0x814E, &st, 1)) return lastDown;
-  if (!(st & 0x80)) {           // keine neuen Daten: letzter Stand
+  if (!gtRead(0x814E, &st, 1) || !(st & 0x80)) {
+    if (lastDown && millis() - lastDataMs > 120) lastDown = false;
     if (lastDown) { *x = lastX; *y = lastY; }
     return lastDown;
   }
+  lastDataMs = millis();
   bool down = false;
   if ((st & 0x0F) > 0) {
     uint8_t p[4];
