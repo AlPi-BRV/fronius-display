@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.4"
+#define FW_VERSION  "0.1.5"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -1344,6 +1344,27 @@ static int detailEnergy(const Rect& b, int y, const String& name, float wh) {
   return detailRow(b, y, name, n, u);
 }
 
+// Kleiner Hinweis am unteren Rand eines Kastens; bricht bei Bedarf in zwei Zeilen um.
+// yBottom = Mitte der untersten Zeile
+static void boxNote(const Rect& b, int yBottom, const String& s) {
+  useFont(fXS);
+  int maxW = b.w - 36;
+  String l1 = s, l2;
+  if (canvas.textWidth(s) > maxW) {
+    // letzte Leerstelle, bis zu der die erste Zeile passt
+    int cut = -1;
+    for (int i = 0; i < (int)s.length(); i++)
+      if (s[i] == ' ' && canvas.textWidth(s.substring(0, i)) <= maxW) cut = i;
+    if (cut > 0) { l1 = s.substring(0, cut); l2 = s.substring(cut + 1); }
+  }
+  if (l2.length()) {
+    text(l1, b.x + 18, yBottom - 22, C_DIM, ML_DATUM);
+    text(l2, b.x + 18, yBottom, C_DIM, ML_DATUM);
+  } else {
+    text(l1, b.x + 18, yBottom, C_DIM, ML_DATUM);
+  }
+}
+
 static void boxTitle(const Rect& b, const char* t, uint16_t col) {
   canvas.fillSmoothRoundRect(b.x, b.y, b.w, b.h, 14, C_TILE);
   useFont(fT);
@@ -1373,7 +1394,7 @@ static void drawDetailPv() {
   if (meter.genValid) y = detailEnergy(R_DR, y, "Weitere Wechselrichter", today.pvGen);
   y = detailEnergy(R_DR, y, "Gesamt", today.pv);
   useFont(fXS);
-  text("Fronius: Leistung × Zeit, solange das Display läuft.", R_DR.x + 18, R_DR.y + R_DR.h - 52, C_DIM, ML_DATUM);
+  boxNote(R_DR, R_DR.y + R_DR.h - 52, "Fronius: Leistung × Zeit, solange das Display läuft.");
   text("Zähler Wechselrichter heute: " + (isnan(today.invCounter) ? String("--") : fmt(today.invCounter / 1000.0f, 1) + " kWh"),
        R_DR.x + 18, R_DR.y + R_DR.h - 28, C_DIM, ML_DATUM);
 }
@@ -1388,11 +1409,7 @@ static void drawDetailLoad() {
   }
   for (int i = 0; i < flow.nSec; i++)
     if (!flow.sec[i].gen) y = detailPower(R_DL, y, flow.sec[i].label, fabsf(flow.sec[i].p));
-  if (flow.nOhm == 0) {
-    useFont(fXS);
-    text("Wallbox und Heizstab erscheinen hier, sobald vorhanden.", R_DL.x + 18, R_DL.y + R_DL.h - 28, C_DIM,
-         ML_DATUM);
-  }
+  if (flow.nOhm == 0) boxNote(R_DL, R_DL.y + R_DL.h - 28, "Wallbox und Heizstab erscheinen hier, sobald vorhanden.");
 
   boxTitle(R_DR, "Heute", C_ACC_BLUE);
   y = R_DR.y + 76;
@@ -1484,11 +1501,8 @@ static void drawDetailBatt() {
   }
   y = detailEnergy(R_DR, y, "Heute geladen", today.battIn);
   y = detailEnergy(R_DR, y, "Heute entladen", today.battOut);
-  useFont(fXS);
-  if (cap <= 0)
-    text("Kapazität einstellen: Zahnrad > Fronius", R_DR.x + 18, R_DR.y + R_DR.h - 22, C_DIM, ML_DATUM);
-  else
-    text("Heute: Leistung × Zeit, solange das Display läuft.", R_DR.x + 18, R_DR.y + R_DR.h - 22, C_DIM, ML_DATUM);
+  boxNote(R_DR, R_DR.y + R_DR.h - 28, cap <= 0 ? String("Kapazität einstellen: Zahnrad > Fronius")
+                                                : String("Heute: Leistung × Zeit, solange das Display läuft."));
 }
 
 static void drawDetail() {
@@ -1837,7 +1851,7 @@ static void drawSettingsBody() {
   if (edTab == 0) {
     for (int i = 0; i <= 2; i++) {
       Rect r = froField(i);
-      useFont(fS);
+      fitFont(FIELD_LABEL[i], r.x - M - 10, &fS, &fXS);
       text(FIELD_LABEL[i], M + 4, r.y + r.h / 2, i == edField ? C_ACC_GRN : C_DIM, ML_DATUM);
       drawField(r, i, i == edField);
     }
