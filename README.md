@@ -102,6 +102,12 @@ Erscheint dort JSON, ist alles bereit.
 | Chip | ESP32-S3-WROOM-1-N4R8 (4 MB Flash, 8 MB PSRAM) |
 | Auflösung | 800 × 480, kapazitiver Touch |
 
+> **Kaufempfehlung: das 5".** Das 7" (DIS08070H) läuft zwar mit derselben Firmware, sein Panel
+> ist im Vergleich aber deutlich schwächer: Das Bild wirkt flau und dunkler, und der Blickwinkel
+> ist eng – schon leicht von der Seite oder von oben verblassen die Farben. Die Einstellung
+> *Kontrast* mildert das etwas, behebt es aber nicht. Wer das Display an der Wand oder schräg im
+> Blick hat, ist mit dem 5" besser bedient.
+
 Beide Größen brauchen **jeweils eigene Firmware** – jede Datei trägt die Größe im Namen
 (`fronius-display-5zoll-…` / `fronius-display-7zoll-…`).
 
