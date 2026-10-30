@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.7"
+#define FW_VERSION  "0.1.8"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -183,6 +183,7 @@ static uint32_t battWh     = 0;       // Batteriekapazitaet in Wh (0 = unbekannt
 static bool     rot180     = false;   // Ausrichtung: um 180° gedreht
 static bool     animOn     = false;   // Energiefluss: false = Pfeile, true = laufende Punkte
 static uint8_t  brightPct  = BRIGHT_DEFAULT_PCT;
+static bool     sleepBlack = false;   // Ruhezustand: false = abdimmen, true = schwarz
 static uint8_t  contrastLvl = CONTRAST_DEFAULT;
 static String   fwUpdatedFrom;
 
@@ -212,6 +213,7 @@ static void loadSettings() {
   animOn     = prefs.getBool("anim2", false);
   brightPct  = prefs.getUChar("bright", BRIGHT_DEFAULT_PCT);
   if (brightPct < 10 || brightPct > 100) brightPct = BRIGHT_DEFAULT_PCT;
+  sleepBlack = prefs.getBool("sleepblk", false);
   contrastLvl = prefs.getUChar("contrast", CONTRAST_DEFAULT);
   if (contrastLvl > 3) contrastLvl = CONTRAST_DEFAULT;
   prefs.end();
@@ -1678,9 +1680,10 @@ static const Rect R_PIC     = { 250, HEAD + 202, 540, 60 };
 static const Rect R_FACT    = { 250, HEAD + 292, 300, 60 };
 
 // Unterseite Helligkeit & Kontrast
-static const int PIC_RAMP_Y = HEAD + 14, PIC_RAMP_H = 34, PIC_RAMP_G = 6, PIC_STEP = 24, PIC_X0 = 16;
-static Rect contrastBtn(int i) { return { 250 + i * 136, HEAD + 272, 128, 60 }; }
-static Rect brightBtn(int i)   { return { 250 + i * 108, HEAD + 356, 100, 60 }; }
+static const int PIC_RAMP_Y = HEAD + 10, PIC_RAMP_H = 26, PIC_RAMP_G = 6, PIC_STEP = 24, PIC_X0 = 16;
+static Rect contrastBtn(int i) { return { 250 + i * 136, HEAD + 202, 128, 56 }; }
+static Rect brightBtn(int i)   { return { 250 + i * 108, HEAD + 270, 100, 56 }; }
+static Rect sleepBtn(int i)    { return { 250 + i * 274, HEAD + 360, 266, 56 }; }
 
 // Tastatur (WLAN)
 static const char* const KB_ROWS[3][5][11] = {
@@ -1897,16 +1900,22 @@ static void drawPicture() {
       canvas.fillRect(PIC_X0 + i * PIC_STEP, y, PIC_STEP, PIC_RAMP_H, (uint16_t)((r << 11) | (g << 5) | b));
     }
   }
-  int yh = PIC_RAMP_Y + 4 * (PIC_RAMP_H + PIC_RAMP_G) + 14;
+  int yh = PIC_RAMP_Y + 4 * (PIC_RAMP_H + PIC_RAMP_G) + 10;
   useFont(fS);
   text("Jede Leiste soll gleichmäßig von Schwarz nach hell verlaufen.", M + 6, yh, C_DIM, ML_DATUM);
-  text("Kontrast: Hintergrund dunkel, die linken Stufen noch erkennbar.", M + 6, yh + 26, C_DIM, ML_DATUM);
+  text("Kontrast: Hintergrund dunkel, die linken Stufen noch erkennbar.", M + 6, yh + 24, C_DIM, ML_DATUM);
   useFont(fT);
   text("Kontrast", M + 6, contrastBtn(0).y + 30, C_TEXT, ML_DATUM);
   for (int i = 0; i < 4; i++) button(contrastBtn(i), CONTRAST_LABEL[i], contrastLvl == i);
   useFont(fT);
   text("Helligkeit", M + 6, brightBtn(0).y + 30, C_TEXT, ML_DATUM);
   for (int i = 0; i < 5; i++) button(brightBtn(i), String(BRIGHT_CHOICES[i]) + " %", brightPct == BRIGHT_CHOICES[i]);
+  useFont(fT);
+  text("Nach 5 min", M + 6, sleepBtn(0).y + 16, C_TEXT, ML_DATUM);
+  useFont(fS);
+  text("ohne Berührung", M + 6, sleepBtn(0).y + 42, C_DIM, ML_DATUM);
+  button(sleepBtn(0), "Abdimmen", !sleepBlack);
+  button(sleepBtn(1), "Schwarz (schont Licht)", sleepBlack);
 }
 
 static void pictureTap(int x, int y) {
@@ -1926,6 +1935,14 @@ static void pictureTap(int x, int y) {
       disp::setBrightness(brightDuty(brightPct));
       prefs.begin(NVS_NS, false);
       prefs.putUChar("bright", brightPct);
+      prefs.end();
+      return;
+    }
+  for (int i = 0; i < 2; i++)
+    if (hit(sleepBtn(i), x, y)) {
+      sleepBlack = i == 1;
+      prefs.begin(NVS_NS, false);
+      prefs.putBool("sleepblk", sleepBlack);
       prefs.end();
       return;
     }
@@ -2608,9 +2625,16 @@ void loop() {
     needRedraw = true;
   }
 
-  if (!dimmed && millis() - lastTouchMs > DIM_AFTER_MS) {
-    dimmed = true;
-    disp::setBrightness(dimDuty());
+  // Ruhezustand nach 5 min ohne Beruehrung: abdimmen oder ganz dunkel.
+  // Bei "Schwarz" leuchtet das Display gedimmt auf, solange eine Stoerung besteht –
+  // so sieht man das durchgestrichene Symbol auch im Ruhezustand.
+  if (!dimmed && millis() - lastTouchMs > DIM_AFTER_MS) dimmed = true;
+  static int lastDuty = -1;
+  int duty = !dimmed ? brightDuty(brightPct)
+                     : (!sleepBlack || netError() != NE_NONE) ? dimDuty() : 0;
+  if (duty != lastDuty) {
+    lastDuty = duty;
+    disp::setBrightness((uint8_t)duty);
   }
 
   if (needRedraw) draw();
