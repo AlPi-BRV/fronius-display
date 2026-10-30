@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.6"
+#define FW_VERSION  "0.1.7"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -50,6 +50,18 @@
 // ---------------------------------------------------------------
 // Voreinstellungen (koennen in config_local.h ueberschrieben werden)
 // ---------------------------------------------------------------
+// Wechselrichter antwortet nicht: schneller erneut fragen, Fehlerbild ab dem 2. Fehlversuch
+#ifndef FAIL_RETRY_MS
+#define FAIL_RETRY_MS  (15UL * 1000UL)
+#endif
+// WLAN weg: so lange warten, bevor das grosse Symbol erscheint (kurze Aussetzer ignorieren)
+#ifndef WIFI_GRACE_MS
+#define WIFI_GRACE_MS  (10UL * 1000UL)
+#endif
+// WLAN weg: so oft neu verbinden
+#ifndef WIFI_RETRY_MS
+#define WIFI_RETRY_MS  (30UL * 1000UL)
+#endif
 #ifndef DIM_AFTER_MS
 #define DIM_AFTER_MS   (5UL * 60UL * 1000UL)
 #endif
@@ -269,7 +281,8 @@ static MeterData   meter;
 static StorageData storage;
 static uint32_t    nextStorageFetch = 0;
 static uint32_t  lastPoll = 0;
-static int       failCount = 0;
+static volatile int failCount = 0;
+static String    lastOkTime;           // Uhrzeit der letzten erfolgreichen Abfrage
 static int       lastHttp = 0;     // letzter HTTP-Code (fuer Meldungen)
 
 // Batteriekapazitaet in Wh: vom Speicher gemeldet, sonst aus den Einstellungen (0 = unbekannt)
@@ -735,6 +748,7 @@ static void applyPoll(const PollResult& r) {
     if (r.meterOk) meter = r.m;
     if (r.storOk) storage = r.st;
     failCount = 0;
+    lastOkTime = uhrzeit();
     dayUpdate();
   } else {
     failCount++;
@@ -746,7 +760,8 @@ static void applyPoll(const PollResult& r) {
 static void pollTask(void*) {
   uint32_t last = 0;
   for (;;) {
-    bool due = pollNow || last == 0 || millis() - last >= pollMs;
+    uint32_t iv = (failCount > 0 && pollMs > FAIL_RETRY_MS) ? FAIL_RETRY_MS : pollMs;
+    bool due = pollNow || last == 0 || millis() - last >= iv;
     String host = hostCopy();
     if (!pollPaused && due && host.length() && WiFi.status() == WL_CONNECTED) {
       pollNow = false;
@@ -1160,7 +1175,82 @@ static void drawArrowsOn(const FlowLine& l) {
 }
 
 // Werte aktuell? Nach 3 fehlgeschlagenen Abrufen grau, Punkte stehen
-static bool online() { return flow.valid && failCount < 3; }
+static bool online() { return flow.valid && failCount < 2; }
+
+// Stoerung fuer das grosse Fehlerbild der Startseite.
+// Nur wenn WLAN und Wechselrichter ueberhaupt eingerichtet sind.
+enum NetErr { NE_NONE = 0, NE_WIFI, NE_INV };
+static uint32_t wifiLostSince = 0;   // 0 = verbunden
+
+static NetErr netError() {
+  if (wifiSsid.length() == 0 || froniusHost.length() == 0) return NE_NONE;
+  if (WiFi.status() != WL_CONNECTED) {
+    if (wifiLostSince == 0) wifiLostSince = millis() ? millis() : 1;
+    if (millis() - wifiLostSince >= WIFI_GRACE_MS) return NE_WIFI;
+    return NE_NONE;
+  }
+  wifiLostSince = 0;
+  if (failCount >= 2 || (!flow.valid && failCount >= 1)) return NE_INV;
+  return NE_NONE;
+}
+
+// Dicker Strich mit dunklem Rand, damit er sich vom Symbol abhebt
+static void strike(int cx, int cy, int half) {
+  canvas.drawWideLine(cx - half, cy - half, cx + half, cy + half, 13, C_BG);
+  canvas.drawWideLine(cx - half, cy - half, cx + half, cy + half, 7, C_ACC_RED);
+}
+
+static void bigWifiSymbol(int cx, int cy) {
+  int by = cy + 55;
+  for (int i = 0; i < 3; i++) {
+    int r1 = 52 + i * 38;
+    canvas.fillArc(cx, by, r1 - 20, r1, 225, 315, C_ACC_ORG);
+  }
+  canvas.fillSmoothCircle(cx, by - 4, 14, C_ACC_ORG);
+  strike(cx, cy - 10, 95);
+}
+
+// Das Wechselrichter-Symbol aus der Mitte des Energieflusses, gross
+static void bigInverterSymbol(int cx, int cy) {
+  const float k = 2.6f;
+  int w = (int)(49 * k), h = (int)(45 * k);
+  int x = cx - w / 2, y = cy - h / 2;
+  uint16_t c = C_ACC_ORG;
+  canvas.fillSmoothRoundRect(x, y, w, h, 16, c);
+  canvas.fillSmoothRoundRect(x + 8, y + 8, w - 16, h - 16, 10, C_BG);
+  int dy = cy - (int)(4 * k);
+  canvas.drawWideLine(x + 8, dy, x + w - 8, dy, 3.0f, c);
+  // oben: Gleichstrom (Linie und Punkte), unten: Sinus
+  canvas.drawWideLine(cx - 10 * k, cy - 15 * k, cx + 10 * k, cy - 15 * k, 3.0f, c);
+  for (int i = -10; i <= 10; i += 5) canvas.fillSmoothCircle(cx + (int)(i * k), cy - (int)(10 * k), 3, c);
+  float px = cx - 14 * k, py = cy + 9 * k;
+  for (int i = 1; i <= 28; i++) {
+    float nx = cx - 14 * k + i * k, ny = cy + 9 * k - 6 * k * sinf(i / 28.0f * 2 * PI);
+    canvas.drawWideLine(px, py, nx, ny, 3.0f, c);
+    px = nx; py = ny;
+  }
+  strike(cx, cy, 100);
+}
+
+// Fehlerbild statt Energiefluss und Tageswerten – keine veralteten Werte wie aktuelle
+static void drawErrorPanel(NetErr e) {
+  canvas.fillRect(0, HEAD, 800, 480 - HEAD, C_BG);
+  int cy = HEAD + 150;
+  if (e == NE_WIFI) bigWifiSymbol(400, cy);
+  else bigInverterSymbol(400, cy);
+  String t1 = e == NE_WIFI ? String("Kein WLAN") : String("Wechselrichter nicht erreichbar");
+  String t2 = e == NE_WIFI ? "Suche Netz \"" + wifiSsid + "\" ..."
+                           : "Keine Antwort von " + froniusHost + " – frage weiter nach ...";
+  fitFont(t1, 760, &fB, &fT);
+  text(t1, 400, HEAD + 290, C_TEXT, MC_DATUM);
+  fitFont(t2, 760, &fT, &fS);
+  text(t2, 400, HEAD + 335, C_DIM, MC_DATUM);
+  useFont(fS);
+  if (flow.valid && lastOkTime.length())
+    text("Letzte Werte von " + lastOkTime + " – werden ausgeblendet, bis wieder Daten kommen",
+         400, HEAD + 372, C_DIM, MC_DATUM);
+  text("Einstellungen: Zahnrad antippen", 400, 480 - 22, C_DIM, MC_DATUM);
+}
 
 static void nodeLabel(int i, float watt, const String& sub, uint16_t subCol) {
   String n, u;
@@ -2202,8 +2292,14 @@ static void draw() {
   canvas.fillScreen(C_BG);
   if (screen == SCR_FLOW) {
     drawFlowHeader();
-    drawFlow();
-    drawTodayPanel();
+    NetErr err = netError();
+    if (err != NE_NONE) {
+      for (FlowLine& l : lines) l.active = false;   // keine laufenden Punkte ueber dem Fehlerbild
+      drawErrorPanel(err);
+    } else {
+      drawFlow();
+      drawTodayPanel();
+    }
   } else if (screen == SCR_DETAIL) {
     drawDetail();
   } else {
@@ -2295,7 +2391,8 @@ static void onTap(int x, int y) {
       return;
     default: break;
   }
-  if (hit(R_GEAR, x, y)) { openSettings(0); return; }
+  if (hit(R_GEAR, x, y)) { openSettings(netError() == NE_WIFI ? 1 : 0); return; }
+  if (netError() != NE_NONE) return;   // Fehlerbild: nichts weiter bedienbar
   int n = nodeAt(x, y);
   if (n >= 0) {
     detailSel = n;
@@ -2427,9 +2524,15 @@ void setup() {
 
   lastTouchMs = millis();
   lastPoll = millis();
-  if (WiFi.status() != WL_CONNECTED) {
+  if (wifiSsid.length() == 0) {      // noch nie eingerichtet
     openSettings(1);
-    toast("WLAN nicht verbunden", C_ACC_ORG, 8000);
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    // Eingerichtet, aber (noch) kein Netz – z. B. Router nach Stromausfall langsamer.
+    // Nicht in den Einstellungen haengen bleiben: Fehlerbild zeigen und weiter verbinden.
+    wifiLostSince = millis() - WIFI_GRACE_MS;   // Symbol sofort zeigen
+    needRedraw = true;
     return;
   }
   if (froniusHost.length() == 0) {
@@ -2472,8 +2575,31 @@ void loop() {
   if (millis() < toastUntil) toastShown = true;
   else if (toastShown) { toastShown = false; needRedraw = true; }
 
+  // Stoerung beginnt oder endet: sofort neu zeichnen
+  static NetErr shownErr = NE_NONE;
+  NetErr err = netError();
+  if (err != shownErr) {
+    shownErr = err;
+    needRedraw = true;
+  }
+
+  // WLAN weg: selbst neu verbinden (nicht waehrend der Einstellungen – dort laeuft ggf. die Netzsuche).
+  // Nach der Rueckkehr sofort abfragen.
+  bool wifiOk = WiFi.status() == WL_CONNECTED;
+  static bool wifiWasOk = true;
+  if (wifiOk && !wifiWasOk) { failCount = 0; pollNow = true; }
+  wifiWasOk = wifiOk;
+  static uint32_t lastWifiTry = 0;
+  if (!wifiOk && wifiSsid.length() && screen != SCR_SETTINGS && millis() - lastWifiTry >= WIFI_RETRY_MS) {
+    lastWifiTry = millis();
+    Serial.println("WLAN getrennt – neuer Verbindungsversuch");
+    NetLock lock;                                     // nicht mitten in eine Abfrage hinein
+    WiFi.disconnect();
+    WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());  // kehrt sofort zurueck
+  }
+
   // Detail- und Einstellungsseiten schliessen sich selbst
-  bool unfertig = froniusHost.length() == 0 || WiFi.status() != WL_CONNECTED;
+  bool unfertig = froniusHost.length() == 0 || wifiSsid.length() == 0;
   if (screen != SCR_FLOW && !(screen == SCR_SETTINGS && unfertig) && millis() - lastTouchMs > PAGE_TIMEOUT_MS) {
     screen = SCR_FLOW;
     confirmAct = A_NONE;

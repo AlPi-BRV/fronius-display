@@ -72,6 +72,10 @@ des Wechselrichters eintragen, *Speichern*.
 - **Updates über WLAN** und Installation im Browser – wie beim
   [Violet Pool-Display](https://github.com/AlPi-BRV/violet-display)
 - Dimmt nach 5 Minuten ohne Berührung; Detail- und Einstellungsseiten schließen sich nach 1 Minute
+- **Störungen auf einen Blick:** Ist das WLAN weg, erscheint ein großes durchgestrichenes WLAN-Symbol,
+  antwortet der Wechselrichter nicht, das durchgestrichene Wechselrichter-Symbol. Veraltete Werte werden
+  so lange ausgeblendet. Das Display verbindet sich selbst neu – auch wenn der Router nach einem
+  Stromausfall später hochfährt.
 
 ### Geplant
 
