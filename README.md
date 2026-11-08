@@ -60,7 +60,9 @@ des Wechselrichters eintragen, *Speichern*.
   - PV – Aufteilung je Wechselrichter (z. B. GEN24 + zusätzlicher Wechselrichter
     über Fronius Smart Meter), später Strings über Modbus
   - Netz – Phasen L1–L3 mit Spannung, Strom, Leistung, Frequenz
-  - Batterie – Ladestand, Lade-/Entladeleistung, „reicht noch ca. …“ / „voll in ca. …“
+  - Batterie – Ladestand, Lade-/Entladeleistung, noch entnehmbare Energie, „leer in ca. …“ /
+    „voll in ca. …“. Beim GEN24 werden Entladegrenze (min_soc) und Zustand der Batterie (SOH)
+    automatisch berücksichtigt: nutzbar = Kapazität × SOH × (Ladestand − Entladegrenze)
   - Verbraucher – Haus, später Wallbox (Wattpilot) und Heizstab (Ohmpilot) getrennt
 - **Tageswerte:** PV-Ertrag, Verbrauch, Netzbezug, Einspeisung, Batterie geladen,
   Autarkie, Eigenverbrauch – aus den Zählerständen selbst berechnet
@@ -68,10 +70,15 @@ des Wechselrichters eintragen, *Speichern*.
 - **Ausrichtung wählbar:** USB-Anschluss links oder rechts (Drehung um 180°) –
   wirkt sofort, Bild und Touch drehen sich mit
 - **Einrichtung komplett am Display:** WLAN, feste IP oder DHCP, IP des Wechselrichters,
-  PV-Leistung (kWp, Vollausschlag des PV-Rings), Batteriekapazität (für die Restzeit)
+  PV-Leistung (kWp, Vollausschlag des PV-Rings), Batteriekapazität (für die Restzeit; ein
+  eingetragener Wert hat Vorrang vor dem vom Speicher gemeldeten, z. B. bei geänderter
+  BMS-Parametertabelle)
 - **Updates über WLAN** und Installation im Browser – wie beim
   [Violet Pool-Display](https://github.com/AlPi-BRV/violet-display)
 - Nach 5 Minuten ohne Berührung wahlweise abdimmen oder ganz schwarz (Einstellungen → Helligkeit & Kontrast); bei einer Störung bleibt das Fehlerbild gedimmt sichtbar. Detail- und Einstellungsseiten schließen sich nach 1 Minute
+- **Nachtschaltung:** in einem Zeitfenster (z. B. 0:00–6:30 Uhr) höchstens 10 % oder 20 % Helligkeit
+  oder ganz aus (Einstellungen → System → Nachtschaltung). Bei „Aus“ leuchtet das Display nach
+  Berührung mit 20 % auf
 - **Störungen auf einen Blick:** Ist das WLAN weg, erscheint ein großes durchgestrichenes WLAN-Symbol,
   antwortet der Wechselrichter nicht, das durchgestrichene Wechselrichter-Symbol. Veraltete Werte werden
   so lange ausgeblendet. Das Display verbindet sich selbst neu – auch wenn der Router nach einem
@@ -123,7 +130,7 @@ Erscheint dort JSON, ist alles bereit.
 | WLAN | Netz suchen und wählen, WLAN-Passwort |
 | IP | Automatisch (DHCP) oder feste IP |
 | Anzeige | Ausrichtung (normal / 180° gedreht), Flussrichtung als Pfeile oder laufende Punkte |
-| System | Abfrageintervall (2 s bis 1 min), Update, Helligkeit & Kontrast, Werkseinstellungen |
+| System | Abfrageintervall (2 s bis 1 min), Update, Helligkeit & Kontrast, Nachtschaltung, Werkseinstellungen |
 
 ## Hardware
 
@@ -138,6 +145,11 @@ Erscheint dort JSON, ist alles bereit.
 > ist eng – schon leicht von der Seite oder von oben verblassen die Farben. Die Einstellung
 > *Kontrast* mildert das etwas, behebt es aber nicht. Wer das Display an der Wand oder schräg im
 > Blick hat, ist mit dem 5" besser bedient.
+
+> **Touch reagiert nicht (vor allem beim 7")?** Prüfen, ob das Flachbandkabel des Touch-Panels
+> auf der Platine richtig im Stecker sitzt und die Verriegelung geschlossen ist. Ein nicht ganz
+> verriegeltes Kabel ist eine bekannte Ursache dafür, dass das Bild läuft, der Touch aber nicht
+> (Danke für den Hinweis aus dem Photovoltaikforum).
 
 Beide Größen brauchen **jeweils eigene Firmware** – jede Datei trägt die Größe im Namen
 (`fronius-display-5zoll-…` / `fronius-display-7zoll-…`).

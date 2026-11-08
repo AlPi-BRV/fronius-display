@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.8"
+#define FW_VERSION  "0.1.9"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -184,6 +184,10 @@ static bool     rot180     = false;   // Ausrichtung: um 180° gedreht
 static bool     animOn     = false;   // Energiefluss: false = Pfeile, true = laufende Punkte
 static uint8_t  brightPct  = BRIGHT_DEFAULT_PCT;
 static bool     sleepBlack = false;   // Ruhezustand: false = abdimmen, true = schwarz
+static bool     nightOn    = false;   // Nachtschaltung
+static uint16_t nightFrom  = 22 * 60; // Beginn in Minuten nach Mitternacht
+static uint16_t nightTo    = 6 * 60;  // Ende
+static uint8_t  nightLvl   = 0;       // Index in NIGHT_LABEL (letzter Eintrag = aus)
 static uint8_t  contrastLvl = CONTRAST_DEFAULT;
 static String   fwUpdatedFrom;
 
@@ -192,6 +196,9 @@ static const char* const POLL_LABEL[] = { "2 s", "5 s", "10 s", "30 s", "1 min" 
 static const uint8_t BRIGHT_CHOICES[] = { 10, 20, 40, 70, 100 };
 static const float   CONTRAST_GAMMA[] = { 1.0f, 1.35f, 1.7f, 2.1f };
 static const char* const CONTRAST_LABEL[] = { "Normal", "Mehr", "Stark", "Max" };
+static const uint8_t NIGHT_PCT[] = { 10, 20, 0 };          // 0 = Display aus
+static const char* const NIGHT_LABEL[] = { "10 %", "20 %", "Aus (schwarz)" };
+static const uint8_t NIGHT_WAKE_PCT = 20;   // Nacht "aus": nach Beruehrung kurz so hell
 
 static uint8_t brightDuty(uint8_t pct) { return (uint8_t)((uint16_t)pct * 255 / 100); }
 static uint8_t dimDuty() { uint8_t d = brightDuty(brightPct); return d < BRIGHT_DIM ? d : BRIGHT_DIM; }
@@ -216,6 +223,13 @@ static void loadSettings() {
   sleepBlack = prefs.getBool("sleepblk", false);
   contrastLvl = prefs.getUChar("contrast", CONTRAST_DEFAULT);
   if (contrastLvl > 3) contrastLvl = CONTRAST_DEFAULT;
+  nightOn    = prefs.getBool("nighton", false);
+  nightFrom  = prefs.getUShort("nightfrom", nightFrom);
+  nightTo    = prefs.getUShort("nightto", nightTo);
+  nightLvl   = prefs.getUChar("nightlvl", 0);
+  if (nightFrom >= 1440) nightFrom = 22 * 60;
+  if (nightTo >= 1440) nightTo = 6 * 60;
+  if (nightLvl > 2) nightLvl = 0;
   prefs.end();
 
   prefs.begin(NVS_NS, false);
@@ -278,21 +292,54 @@ struct StorageData {
   String model;                    // z. B. "BYD Battery-Box Premium HV"
 };
 
+// Angaben aus /components/readable (GEN24): Typenschild und Gesundheit des Speichers.
+// Fehlt die Seite (aeltere Firmware, Symo Hybrid), bleibt alles NAN und es wird
+// wie bisher ohne Entladegrenze und Alterung gerechnet.
+struct BattInfo {
+  bool   valid = false;
+  float  capWh = NAN;              // capacity_wh aus dem Typenschild
+  float  minSoc = NAN;             // min_soc – darunter entlaedt der Wechselrichter nicht
+  float  maxSoc = NAN;             // max_soc
+  float  soh = NAN;                // BAT_VALUE_STATE_OF_HEALTH_RELATIVE_U16 in %
+};
+
 static FlowData    flow;
 static MeterData   meter;
 static StorageData storage;
+static BattInfo    battInfo;
 static uint32_t    nextStorageFetch = 0;
+static uint32_t    nextBattInfoFetch = 0;
 static uint32_t  lastPoll = 0;
 static volatile int failCount = 0;
 static String    lastOkTime;           // Uhrzeit der letzten erfolgreichen Abfrage
 static int       lastHttp = 0;     // letzter HTTP-Code (fuer Meldungen)
 
-// Batteriekapazitaet in Wh: vom Speicher gemeldet, sonst aus den Einstellungen (0 = unbekannt)
-static float battCapWh() {
+// Batteriekapazitaet in Wh (0 = unbekannt). Ein eingetragener Wert hat Vorrang –
+// z. B. wenn eine geaenderte BMS-Parametertabelle eine andere Nennkapazitaet meldet.
+static float battCapReported() {
   if (storage.valid && !isnan(storage.capWh) && storage.capWh > 100) return storage.capWh;
-  return (float)battWh;
+  if (battInfo.valid && !isnan(battInfo.capWh) && battInfo.capWh > 100) return battInfo.capWh;
+  return 0;
 }
-static bool battCapAuto() { return storage.valid && !isnan(storage.capWh) && storage.capWh > 100; }
+static float battCapWh() { return battWh > 0 ? (float)battWh : battCapReported(); }
+static bool battCapAuto() { return battWh == 0 && battCapReported() > 0; }
+static float battSoh() {           // Gesundheit in % (100, wenn unbekannt)
+  return (battInfo.valid && !isnan(battInfo.soh) && battInfo.soh > 0 && battInfo.soh <= 100) ? battInfo.soh : 100.0f;
+}
+static float battMinSoc() {
+  return (battInfo.valid && !isnan(battInfo.minSoc) && battInfo.minSoc >= 0 && battInfo.minSoc < 90) ? battInfo.minSoc : 0.0f;
+}
+static float battMaxSoc() {
+  float m = (battInfo.valid && !isnan(battInfo.maxSoc) && battInfo.maxSoc > 10 && battInfo.maxSoc <= 100) ? battInfo.maxSoc : 100.0f;
+  return m > battMinSoc() ? m : 100.0f;
+}
+// tatsaechlich speicherbare Energie: Kapazitaet x Gesundheit
+static float battUsableWh() { return battCapWh() * battSoh() / 100.0f; }
+// davon jetzt noch entnehmbar (oberhalb der Entladegrenze)
+static float battAvailWh(float soc) {
+  if (isnan(soc)) return NAN;
+  return battUsableWh() * fmaxf(0.0f, soc - battMinSoc()) / 100.0f;
+}
 
 // Abgeleitete Momentanwerte
 static float pvGenW() {            // weitere Wechselrichter (Smart Meter, Kategorie WR)
@@ -433,6 +480,7 @@ enum Node { N_PV = 0, N_LOAD = 1, N_GRID = 2, N_BATT = 3 };
 static int      detailSel = N_PV;
 static uint32_t lastTouchMs = 0;
 static bool     dimmed = false;
+static int      appliedDuty = -1;    // zuletzt gesetzte Helligkeit (-1 = neu setzen)
 static bool     needRedraw = true;
 
 enum Action { A_NONE, A_FACTORY, A_OTA };
@@ -695,6 +743,71 @@ static bool readStorage(const String& host, StorageData& n) {
   return false;
 }
 
+// /components/readable ist ca. 15 kB gross und enthaelt das Typenschild als
+// JSON-Text im JSON ("nameplate": "{\"capacity_wh\":12800,...}"). Statt alles zu
+// parsen, wird der Datenstrom nach den wenigen benoetigten Schluesseln durchsucht –
+// so braucht es fast keinen Speicher.
+static bool readBattInfo(const String& host, BattInfo& n) {
+  if (WiFi.status() != WL_CONNECTED || host.length() == 0) return false;
+  HTTPClient http;
+  http.useHTTP10(true);
+  http.setTimeout(4000);
+  http.setConnectTimeout(3000);
+  if (!http.begin("http://" + host + "/components/readable")) return false;
+  int code = http.GET();
+  if (code != 200) {
+    Serial.printf("Fronius /components/readable: HTTP %d\n", code);
+    http.end();
+    return false;
+  }
+  static const char* const KEYS[4] = { "\"BAT_VALUE_STATE_OF_HEALTH_RELATIVE_U16\"", "min_soc", "max_soc",
+                                       "capacity_wh" };
+  float val[4] = { NAN, NAN, NAN, NAN };
+  char win[48];
+  size_t wl = 0;
+  int want = -1;
+  char num[16];
+  int nl = 0;
+  WiFiClient* st = http.getStreamPtr();
+  uint32_t t0 = millis(), lastData = millis();
+  while ((http.connected() || st->available()) && millis() - t0 < 8000) {
+    if (!st->available()) {
+      if (millis() - lastData > 3000) break;
+      delay(2);
+      continue;
+    }
+    lastData = millis();
+    char c = (char)st->read();
+    if (want >= 0) {
+      bool digit = c >= '0' && c <= '9';
+      if (digit || (nl > 0 && (c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')) || (nl == 0 && c == '-')) {
+        if (nl < 15) num[nl++] = c;
+        continue;
+      }
+      if (nl == 0 && (c == ' ' || c == '"' || c == '\\' || c == ':')) continue;
+      num[nl] = 0;
+      if (nl > 0 && isnan(val[want])) val[want] = atof(num);
+      want = -1;
+      nl = 0;
+    }
+    if (wl == sizeof(win)) { memmove(win, win + 1, sizeof(win) - 1); wl--; }
+    win[wl++] = c;
+    for (int k = 0; k < 4; k++) {
+      size_t kl = strlen(KEYS[k]);
+      if (wl >= kl && memcmp(win + wl - kl, KEYS[k], kl) == 0) { want = k; nl = 0; break; }
+    }
+  }
+  http.end();
+  n.soh    = val[0];
+  n.minSoc = val[1];
+  n.maxSoc = val[2];
+  n.capWh  = val[3];
+  n.valid  = !isnan(val[0]) || !isnan(val[1]) || !isnan(val[3]);
+  Serial.printf("Speicher-Typenschild: %.0f Wh, SOC min %.0f / max %.0f %%, SOH %.0f %%\n", n.capWh, n.minSoc,
+                n.maxSoc, n.soh);
+  return n.valid;
+}
+
 // ---------------------------------------------------------------
 // Abfrage im Hintergrund (zweiter Prozessorkern)
 // Die Anfragen an den Wechselrichter dauern je nach Geraet bis zu einigen
@@ -711,6 +824,8 @@ struct PollResult {
   MeterData m;
   bool storOk = false;
   StorageData st;
+  bool binfOk = false;
+  BattInfo bi;
 };
 static SemaphoreHandle_t netMx = nullptr;
 static SemaphoreHandle_t dataMx = nullptr;
@@ -741,6 +856,11 @@ static void fetchAll(const String& host, PollResult& r) {
     r.storOk = readStorage(host, r.st);
     nextStorageFetch = millis() + (r.storOk ? 60000UL : 10UL * 60000UL);
   }
+  // Typenschild und Gesundheit aendern sich kaum – alle 10 min, ohne Antwort stuendlich
+  if (r.f.hasBatt && millis() >= nextBattInfoFetch) {
+    r.binfOk = readBattInfo(host, r.bi);
+    nextBattInfoFetch = millis() + (r.binfOk ? 10UL * 60000UL : 60UL * 60000UL);
+  }
 }
 
 // Ergebnis uebernehmen (nur aus loop() bzw. dem Haupt-Task)
@@ -749,6 +869,7 @@ static void applyPoll(const PollResult& r) {
     flow = r.f;
     if (r.meterOk) meter = r.m;
     if (r.storOk) storage = r.st;
+    if (r.binfOk) battInfo = r.bi;
     failCount = 0;
     lastOkTime = uhrzeit();
     dayUpdate();
@@ -1563,14 +1684,17 @@ static void drawDetailBatt() {
   if (!isnan(flow.pAkku) && fabsf(flow.pAkku) >= FLOW_MIN_W) pname = flow.pAkku < 0 ? "Lädt mit" : "Entlädt mit";
   y = detailPower(R_DL, y, pname, flow.pAkku);
   y = detailRow(R_DL, y, "Betrieb", battModeText(flow.battMode), "");
+  if (battMinSoc() > 0) y = detailRow(R_DL, y, "Entladegrenze", fmt(battMinSoc(), 0), "%");
   if (cap > 0) {
-    float drin = isnan(flow.soc) ? NAN : cap * flow.soc / 100.0f;
+    // nutzbar = Kapazitaet x Gesundheit, nur oberhalb der Entladegrenze
+    float drin = battAvailWh(flow.soc);
     String n, u;
     energyParts(drin, n, u);
-    y = detailRow(R_DL, y, "Energie im Speicher", n, u);
+    y = detailRow(R_DL, y, battMinSoc() > 0 ? "Noch entnehmbar" : "Energie im Speicher", n, u);
     // grobe Restzeit bei aktueller Leistung
     if (!isnan(flow.pAkku) && fabsf(flow.pAkku) >= 100 && !isnan(flow.soc)) {
-      float h = flow.pAkku > 0 ? drin / flow.pAkku : (cap - drin) / -flow.pAkku;
+      float bisVoll = battUsableWh() * fmaxf(0.0f, battMaxSoc() - flow.soc) / 100.0f;
+      float h = flow.pAkku > 0 ? drin / flow.pAkku : bisVoll / -flow.pAkku;
       String d = dauerText(h);
       if (d.length()) y = detailRow(R_DL, y, flow.pAkku > 0 ? "Leer in ca." : "Voll in ca.", d, "");
     }
@@ -1587,6 +1711,7 @@ static void drawDetailBatt() {
     energyParts(cap, n, u);
     y = detailRow(R_DR, y, battCapAuto() ? "Kapazität" : "Kapazität (eingestellt)", n, u);
   }
+  if (battSoh() < 100) y = detailRow(R_DR, y, "Zustand (SOH)", fmt(battSoh(), 0), "%");
   if (storage.valid) {
     y = detailRow(R_DR, y, "Zelltemperatur", fmt(storage.tempC, 0), "°C");
     y = detailRow(R_DR, y, "Spannung", fmt(storage.voltDc, 0), "V");
@@ -1621,6 +1746,7 @@ static bool     edIpFixed = false;
 static uint32_t edPoll = 5000;
 static bool     edAnim = true;
 static bool     picPage = false;
+static bool     nightPage = false;
 enum KbLayer { KB_LOWER, KB_UPPER, KB_SYM };
 static KbLayer  kbLayer = KB_LOWER;
 
@@ -1676,7 +1802,8 @@ static Rect optBtn(int row, int col) { return { 250 + col * 190, HEAD + 22 + row
 // Reiter System
 static Rect pollBtn(int i) { return { 250 + i * 108, HEAD + 22, 100, 60 }; }
 static const Rect R_UPD     = { 250, HEAD + 112, 540, 60 };
-static const Rect R_PIC     = { 250, HEAD + 202, 540, 60 };
+static const Rect R_PIC     = { 250, HEAD + 202, 265, 60 };
+static const Rect R_NIGHT   = { 525, HEAD + 202, 265, 60 };
 static const Rect R_FACT    = { 250, HEAD + 292, 300, 60 };
 
 // Unterseite Helligkeit & Kontrast
@@ -1684,6 +1811,16 @@ static const int PIC_RAMP_Y = HEAD + 10, PIC_RAMP_H = 26, PIC_RAMP_G = 6, PIC_ST
 static Rect contrastBtn(int i) { return { 250 + i * 136, HEAD + 202, 128, 56 }; }
 static Rect brightBtn(int i)   { return { 250 + i * 108, HEAD + 270, 100, 56 }; }
 static Rect sleepBtn(int i)    { return { 250 + i * 274, HEAD + 360, 266, 56 }; }
+
+// Unterseite Nachtschaltung
+static Rect nightOnBtn(int i)  { return { 250 + i * 190, HEAD + 20, 180, 60 }; }
+static Rect nightMinus(int row) { return { 250, HEAD + 100 + row * 80, 90, 60 }; }
+static Rect nightVal(int row)   { return { 350, HEAD + 100 + row * 80, 170, 60 }; }
+static Rect nightPlus(int row)  { return { 530, HEAD + 100 + row * 80, 90, 60 }; }
+static Rect nightLvlBtn(int i) {
+  static const int X[3] = { 250, 380, 510 }, W[3] = { 120, 120, 280 };
+  return { X[i], HEAD + 270, W[i], 60 };
+}
 
 // Tastatur (WLAN)
 static const char* const KB_ROWS[3][5][11] = {
@@ -1739,9 +1876,10 @@ static String keyLabel(const String& t) {
 }
 
 // kWp / kWh als Text mit Punkt (Eingabe) <-> Zahl
-static String numEdit(uint32_t milli) {
+static String numEdit(uint32_t milli) {   // 10240 -> "10.24", 13300 -> "13.3"
   if (milli == 0) return "";
-  String s = String(milli / 1000.0f, 1);
+  String s = String(milli / 1000.0f, 2);
+  if (s.endsWith("0")) s.remove(s.length() - 1);
   if (s.endsWith(".0")) s.remove(s.length() - 2);
   return s;
 }
@@ -1771,6 +1909,7 @@ static void openSettings(int tab) {
   edPoll = pollMs;
   edAnim = animOn;
   picPage = false;
+  nightPage = false;
   edTab = tab;
   edField = tab == 0 ? 0 : (tab == 1 ? 3 : 5);
   edShowPass = false;
@@ -1887,6 +2026,43 @@ static void drawSettings() {
   }
 }
 
+// ---------------------------------------------------------------
+// Nachtschaltung
+// ---------------------------------------------------------------
+static int nowMinutes() {
+  struct tm t;
+  if (!localTime(t)) return -1;
+  return t.tm_hour * 60 + t.tm_min;
+}
+static bool nightNow() {
+  if (!nightOn || nightFrom == nightTo) return false;
+  int m = nowMinutes();
+  if (m < 0) return false;                       // Uhrzeit noch unbekannt
+  return nightFrom < nightTo ? (m >= nightFrom && m < nightTo) : (m >= nightFrom || m < nightTo);
+}
+// Helligkeit fuer jetzt: Tag/Nacht, wach/Ruhezustand. Bei einer Stoerung leuchtet
+// das Display auch im Ruhezustand gedimmt, damit man das Symbol sieht.
+static int wantedDuty() {
+  bool err = netError() != NE_NONE;
+  if (!nightNow()) {
+    if (!dimmed) return brightDuty(brightPct);
+    return (!sleepBlack || err) ? dimDuty() : 0;
+  }
+  uint8_t np = NIGHT_PCT[nightLvl];
+  if (np == 0) {                                 // nachts aus – nach Beruehrung kurz an
+    if (!dimmed) return brightDuty(min(brightPct, NIGHT_WAKE_PCT));
+    return err ? brightDuty(10) : 0;
+  }
+  int d = brightDuty(min(brightPct, np));
+  if (!dimmed) return d;
+  return (!sleepBlack || err) ? min(d, (int)BRIGHT_DIM) : 0;
+}
+static String hhmm(int m) {
+  char b[8];
+  snprintf(b, sizeof(b), "%02d:%02d", m / 60, m % 60);
+  return String(b);
+}
+
 static void drawPicture() {
   useFont(fT);
   text("Helligkeit & Kontrast", M + 6, HEAD / 2, C_TEXT, ML_DATUM);
@@ -1932,7 +2108,7 @@ static void pictureTap(int x, int y) {
   for (int i = 0; i < 5; i++)
     if (hit(brightBtn(i), x, y)) {
       brightPct = BRIGHT_CHOICES[i];
-      disp::setBrightness(brightDuty(brightPct));
+      appliedDuty = -1;
       prefs.begin(NVS_NS, false);
       prefs.putUChar("bright", brightPct);
       prefs.end();
@@ -1948,8 +2124,68 @@ static void pictureTap(int x, int y) {
     }
 }
 
+static void drawNight() {
+  useFont(fT);
+  text("Nachtschaltung", M + 6, HEAD / 2, C_TEXT, ML_DATUM);
+  button(R_SAVE, "Fertig", false, C_BTN, C_ACC_GRN, true);
+  useFont(fT);
+  text("Nachtschaltung", M + 6, nightOnBtn(0).y + 30, C_TEXT, ML_DATUM);
+  button(nightOnBtn(0), "Aus", !nightOn);
+  button(nightOnBtn(1), "Ein", nightOn);
+  static const char* const ROW[2] = { "Von", "Bis" };
+  for (int r = 0; r < 2; r++) {
+    uint16_t col = nightOn ? C_TEXT : C_DIM;
+    useFont(fT);
+    text(ROW[r], M + 6, nightVal(r).y + 30, col, ML_DATUM);
+    button(nightMinus(r), "-", false);
+    button(nightPlus(r), "+", false);
+    Rect v = nightVal(r);
+    canvas.drawRoundRect(v.x, v.y, v.w, v.h, 12, C_BTN);
+    String t = hhmm(r == 0 ? nightFrom : nightTo) + " Uhr";
+    fitFont(t, v.w - 16, &fB, &fT);
+    text(t, v.x + v.w / 2, v.y + v.h / 2, col, MC_DATUM);
+  }
+  useFont(fT);
+  text("Helligkeit", M + 6, nightLvlBtn(0).y + 16, nightOn ? C_TEXT : C_DIM, ML_DATUM);
+  useFont(fS);
+  text("nachts höchstens", M + 6, nightLvlBtn(0).y + 42, C_DIM, ML_DATUM);
+  for (int i = 0; i < 3; i++) button(nightLvlBtn(i), NIGHT_LABEL[i], nightLvl == i);
+  useFont(fS);
+  int y = nightLvlBtn(0).y + 90;
+  text("Gilt auch nach Berührung; der Ruhezustand nach 5 min bleibt.", M + 6, y, C_DIM, ML_DATUM);
+  text("Bei \"Aus\" leuchtet das Display nach Berührung mit " + String(NIGHT_WAKE_PCT) + " % auf.", M + 6, y + 24,
+       C_DIM, ML_DATUM);
+  int m = nowMinutes();
+  String st = m < 0 ? String("Uhrzeit noch unbekannt") : "Jetzt " + hhmm(m) + " Uhr – " + (nightNow() ? "Nacht" : "Tag");
+  text(st, M + 6, 480 - M - 4, nightNow() ? C_ACC_GRN : C_DIM, BL_DATUM);
+}
+
+static void nightSave() {
+  prefs.begin(NVS_NS, false);
+  prefs.putBool("nighton", nightOn);
+  prefs.putUShort("nightfrom", nightFrom);
+  prefs.putUShort("nightto", nightTo);
+  prefs.putUChar("nightlvl", nightLvl);
+  prefs.end();
+  appliedDuty = -1;
+}
+
+static void nightTap(int x, int y) {
+  if (hit(R_SAVE, x, y)) { nightPage = false; return; }
+  for (int i = 0; i < 2; i++)
+    if (hit(nightOnBtn(i), x, y)) { nightOn = i == 1; nightSave(); return; }
+  for (int r = 0; r < 2; r++) {
+    uint16_t& v = r == 0 ? nightFrom : nightTo;
+    if (hit(nightMinus(r), x, y)) { v = (v + 1440 - 30) % 1440; v -= v % 30; nightSave(); return; }
+    if (hit(nightPlus(r), x, y))  { v = (v - v % 30 + 30) % 1440; nightSave(); return; }
+  }
+  for (int i = 0; i < 3; i++)
+    if (hit(nightLvlBtn(i), x, y)) { nightLvl = i; nightSave(); return; }
+}
+
 static void drawSettingsBody() {
   if (picPage) { drawPicture(); return; }
+  if (nightPage) { drawNight(); return; }
   if (wifiList) { drawWifiList(); return; }
   for (int i = 0; i < NTAB; i++) button(tabRect(i), TAB_NAME[i], edTab == i, C_BTN, C_TEXT, true);
   button(R_CANCEL, "Abbrechen", false, C_BTN, C_TEXT, true);
@@ -1966,8 +2202,9 @@ static void drawSettingsBody() {
     useFont(fXS);
     int y = R_TEST.y + R_TEST.h + 22;
     text("PV-Leistung: Vollausschlag des PV-Rings (z. B. 13.3)", M + 4, y, C_DIM, ML_DATUM);
-    text(battCapAuto() ? "Batterie: meldet " + fmt(storage.capWh / 1000.0f, 1) + " kWh – Feld kann leer bleiben"
-                       : String("Batterie: nur nötig, wenn der Speicher nichts meldet"),
+    text(battCapReported() > 0 ? "Batterie: meldet " + fmt(battCapReported() / 1000.0f, 2) +
+                                     " kWh – eigener Wert hat Vorrang"
+                               : String("Batterie: nur nötig, wenn der Speicher nichts meldet"),
          M + 4, y + 22, C_DIM, ML_DATUM);
     text("Solar API am Wechselrichter einschalten!", M + 4, y + 44, C_DIM, ML_DATUM);
     drawPad();
@@ -2038,7 +2275,9 @@ static void drawSettingsBody() {
       button(R_UPD, "Nach Update suchen", false);
     useFont(fT);
     text("Bild", M + 6, R_PIC.y + 30, C_TEXT, ML_DATUM);
-    button(R_PIC, "Helligkeit & Kontrast ...", false);
+    button(R_PIC, "Helligkeit & Kontrast ...", false, C_BTN, C_TEXT, true);
+    button(R_NIGHT, nightOn ? "Nacht " + hhmm(nightFrom) + "–" + hhmm(nightTo) + " ..." : String("Nachtschaltung ..."),
+           false, C_BTN, C_TEXT, true);
     useFont(fT);
     text("Zurücksetzen", M + 6, R_FACT.y + 30, C_TEXT, ML_DATUM);
     button(R_FACT, "Werkseinstellungen", false, C_BTN_RED);
@@ -2152,6 +2391,10 @@ static void saveSettings() {
     dayS = DayStore();
     lastIntegMs = 0;
     daySave();
+    storage = StorageData();             // Speicherangaben vom neuen Geraet holen
+    battInfo = BattInfo();
+    nextStorageFetch = 0;
+    nextBattInfoFetch = 0;
   }
 
   screen = SCR_FLOW;
@@ -2208,6 +2451,7 @@ static void testConnection() {
 static void settingsTap(int x, int y) {
   needRedraw = true;
   if (picPage) { pictureTap(x, y); return; }
+  if (nightPage) { nightTap(x, y); return; }
   if (wifiList) {
     if (hit(R_SAVE, x, y)) { wifiList = false; return; }
     for (int i = 0; i < scanN; i++) {
@@ -2283,6 +2527,7 @@ static void settingsTap(int x, int y) {
   } else if (edTab == 4) {
     for (int i = 0; i < 5; i++) if (hit(pollBtn(i), x, y)) { edPoll = POLL_CHOICES[i]; return; }
     if (hit(R_PIC, x, y)) { picPage = true; return; }
+    if (hit(R_NIGHT, x, y)) { nightPage = true; return; }
     if (hit(R_UPD, x, y)) {
       if (updateVersion.length()) {
         askConfirm(A_OTA, "Update " + updateVersion + " installieren?", "Das Display startet danach neu.");
@@ -2449,7 +2694,7 @@ static void handleTouch() {
     lastTouchMs = millis();
     if (dimmed) {
       dimmed = false;
-      disp::setBrightness(brightDuty(brightPct));
+      appliedDuty = -1;
     } else if (screen == SCR_FLOW && confirmAct == A_NONE) {
       pendingTap = true;
     } else {
@@ -2622,6 +2867,7 @@ void loop() {
     confirmAct = A_NONE;
     wifiList = false;
     picPage = false;
+    nightPage = false;
     needRedraw = true;
   }
 
@@ -2629,11 +2875,9 @@ void loop() {
   // Bei "Schwarz" leuchtet das Display gedimmt auf, solange eine Stoerung besteht –
   // so sieht man das durchgestrichene Symbol auch im Ruhezustand.
   if (!dimmed && millis() - lastTouchMs > DIM_AFTER_MS) dimmed = true;
-  static int lastDuty = -1;
-  int duty = !dimmed ? brightDuty(brightPct)
-                     : (!sleepBlack || netError() != NE_NONE) ? dimDuty() : 0;
-  if (duty != lastDuty) {
-    lastDuty = duty;
+  int duty = wantedDuty();
+  if (duty != appliedDuty) {
+    appliedDuty = duty;
     disp::setBrightness((uint8_t)duty);
   }
 
