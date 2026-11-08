@@ -389,7 +389,14 @@ struct Today {
 };
 static Today today;
 
-static bool localTime(struct tm& t) { return getLocalTime(&t, 0) && t.tm_year > 120; }
+// nicht getLocalTime(&t, 0): prueft nur, solange millis() noch denselben Wert hat –
+// bei beschaeftigtem Prozessor meldet es ab und zu "keine Uhrzeit". Die Nachtschaltung
+// galt dann kurz als Tag und das Display blitzte beim Datenabruf hell auf.
+static bool localTime(struct tm& t) {
+  time_t now = time(nullptr);
+  localtime_r(&now, &t);
+  return t.tm_year > 120;
+}
 
 static void daySave() {
   prefs.begin(NVS_NS, false);
