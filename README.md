@@ -79,6 +79,10 @@ des Wechselrichters eintragen, *Speichern*.
 - **Nachtschaltung:** in einem Zeitfenster (z. B. 0:00–6:30 Uhr) höchstens 10 % oder 20 % Helligkeit
   oder ganz aus (Einstellungen → System → Nachtschaltung). Bei „Aus“ leuchtet das Display nach
   Berührung mit 20 % auf
+- **Netzladung:** Wird die Batterie auch aus dem Netz geladen (z. B. nachts mit dynamischem Tarif
+  oder bei einer Zwangsladung), unter Einstellungen → Anzeige → Netzladung „Ja“ wählen. Dann zählt
+  die Ladung aus dem Netz nicht als Hausverbrauch, und die Autarkie wird ohne den Netzstrom für die
+  Batterie gerechnet. Auf der Netz-Seite steht zusätzlich „davon in die Batterie“
 - **Störungen auf einen Blick:** Ist das WLAN weg, erscheint ein großes durchgestrichenes WLAN-Symbol,
   antwortet der Wechselrichter nicht, das durchgestrichene Wechselrichter-Symbol. Veraltete Werte werden
   so lange ausgeblendet. Das Display verbindet sich selbst neu – auch wenn der Router nach einem
@@ -100,6 +104,7 @@ Der GEN24 liefert keine Tageswerte (`E_Day` ist leer). Das Display rechnet selbs
 | Weitere Wechselrichter (z. B. Hoymiles) | Zählerstand ihres Smart Meters | genau |
 | Verbrauch, Autarkie | Zähler: Wechselrichter + weitere WR + Bezug − Einspeisung | genau |
 | PV des Fronius, Batterie geladen/entladen | Leistung × Zeit, solange das Display läuft | Näherung |
+| Netzladung der Batterie (nur bei „Netzladung: Ja“) | Leistung × Zeit, solange das Display läuft | Näherung |
 
 Die Stände des Tagesbeginns werden alle 5 Minuten im Flash gesichert und überstehen
 Stromausfall, Neustart und Updates. Die zählerbasierten Werte stimmen auch, wenn das
@@ -129,7 +134,7 @@ Erscheint dort JSON, ist alles bereit.
 | Fronius | IP des Wechselrichters, PV-Leistung (kWp), Batterie (kWh), *Verbindung testen* |
 | WLAN | Netz suchen und wählen, WLAN-Passwort |
 | IP | Automatisch (DHCP) oder feste IP |
-| Anzeige | Ausrichtung (normal / 180° gedreht), Flussrichtung als Pfeile oder laufende Punkte |
+| Anzeige | Ausrichtung (normal / 180° gedreht), Flussrichtung als Pfeile oder laufende Punkte, Netzladung der Batterie Nein/Ja |
 | System | Abfrageintervall (2 s bis 1 min), Update, Helligkeit & Kontrast, Nachtschaltung, Werkseinstellungen |
 
 ## Hardware

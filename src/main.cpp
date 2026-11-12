@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.11"
+#define FW_VERSION  "0.1.12"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -188,6 +188,7 @@ static bool     nightOn    = false;   // Nachtschaltung
 static uint16_t nightFrom  = 22 * 60; // Beginn in Minuten nach Mitternacht
 static uint16_t nightTo    = 6 * 60;  // Ende
 static uint8_t  nightLvl   = 0;       // Index in NIGHT_LABEL (letzter Eintrag = aus)
+static bool     gridChg    = false;   // Batterie wird auch aus dem Netz geladen (z. B. Tibber)
 static uint8_t  contrastLvl = CONTRAST_DEFAULT;
 static String   fwUpdatedFrom;
 
@@ -227,6 +228,7 @@ static void loadSettings() {
   nightFrom  = prefs.getUShort("nightfrom", nightFrom);
   nightTo    = prefs.getUShort("nightto", nightTo);
   nightLvl   = prefs.getUChar("nightlvl", 0);
+  gridChg    = prefs.getBool("gridchg", false);
   if (nightFrom >= 1440) nightFrom = 22 * 60;
   if (nightTo >= 1440) nightTo = 6 * 60;
   if (nightLvl > 2) nightLvl = 0;
@@ -265,6 +267,7 @@ struct FlowData {
   String battMode;
   bool   battStandby = false;
   double eInvTotal = NAN;          // Zaehler des Fronius-Wechselrichters in Wh
+  float  pInv = NAN;               // AC-Leistung des Wechselrichters (< 0 = nimmt aus dem Netz auf)
   int    nSec = 0;
   SecMeter sec[4];
   int    nOhm = 0;                 // Ohmpilot (Heizstab)
@@ -368,14 +371,27 @@ static float loadW() {
 //     Smart Meter, Stand um Mitternacht gemerkt (genau)
 //   - PV des Fronius, Verbrauch, Batterie: Leistung ueber die Zeit
 //     aufsummiert, solange das Display laeuft (Naeherung)
+//   - Netzladung der Batterie (Einstellung "Netzladung"): E_Total zaehlt nur, was der
+//     Wechselrichter abgibt, nicht was er zum Laden aus dem Netz aufnimmt. Diese Energie
+//     steckt im Netzbezug und wuerde als Hausverbrauch zaehlen. Mit "Ja" wird sie
+//     herausgerechnet: Verbrauch ohne Ladung, Autarkie ohne Netz->Batterie.
 // Alles wird im Flash gesichert und uebersteht Neustarts und Updates.
 // ---------------------------------------------------------------
+struct DayStoreV1 {               // Aufbau bis 0.1.11 (zum Uebernehmen nach dem Update)
+  uint32_t day = 0;
+  uint16_t startMin = 0;
+  uint16_t ver = 1;
+  double   eImp = NAN, eExp = NAN, eGen = NAN, eInv = NAN;
+  float    pvWh = 0, loadWh = 0, battInWh = 0, battOutWh = 0;
+};
 struct DayStore {
   uint32_t day = 0;               // JJJJMMTT
   uint16_t startMin = 0;          // Minute des Tages, ab der gezaehlt wird (0 = ganzer Tag)
-  uint16_t ver = 1;
+  uint16_t ver = 2;
   double   eImp = NAN, eExp = NAN, eGen = NAN, eInv = NAN;   // Zaehlerstaende am Tagesbeginn
   float    pvWh = 0, loadWh = 0, battInWh = 0, battOutWh = 0;
+  float    acInWh = 0;            // vom Wechselrichter aus dem AC-Netz aufgenommen (Batterie laden)
+  float    gridBattWh = 0;        // davon aus dem oeffentlichen Netz
 };
 static DayStore dayS;
 static uint32_t lastIntegMs = 0;
@@ -385,6 +401,8 @@ struct Today {
   bool  valid = false;
   float pv = NAN, pvFr = NAN, pvGen = NAN, load = NAN, imp = NAN, exp = NAN;
   float battIn = NAN, battOut = NAN, invCounter = NAN;
+  float gridBatt = NAN;            // Batterie aus dem Netz geladen (nur mit Einstellung Netzladung)
+  float impHouse = NAN;            // Netzbezug fuers Haus (ohne Netzladung)
   float autarkie = NAN, eigen = NAN;
 };
 static Today today;
@@ -408,7 +426,18 @@ static void daySave() {
 static void dayLoad() {
   prefs.begin(NVS_NS, true);
   DayStore d;
-  if (prefs.getBytes("day", &d, sizeof(d)) == sizeof(d) && d.ver == 1) dayS = d;
+  size_t len = prefs.getBytesLength("day");
+  if (len == sizeof(d) && prefs.getBytes("day", &d, sizeof(d)) == sizeof(d) && d.ver == 2) {
+    dayS = d;
+  } else if (len == sizeof(DayStoreV1)) {              // Stand von 0.1.11 uebernehmen
+    DayStoreV1 o;
+    if (prefs.getBytes("day", &o, sizeof(o)) == sizeof(o) && o.ver == 1) {
+      d.day = o.day; d.startMin = o.startMin;
+      d.eImp = o.eImp; d.eExp = o.eExp; d.eGen = o.eGen; d.eInv = o.eInv;
+      d.pvWh = o.pvWh; d.loadWh = o.loadWh; d.battInWh = o.battInWh; d.battOutWh = o.battOutWh;
+      dayS = d;
+    }
+  }
   prefs.end();
 }
 
@@ -430,9 +459,16 @@ static void computeToday() {
   //   Haus = Wechselrichter (AC) + weitere Wechselrichter + Netzbezug - Einspeisung
   if (!isnan(t.invCounter) && !isnan(t.imp)) {
     float l = t.invCounter + t.pvGen + t.imp - t.exp;
+    if (gridChg) l -= dayS.acInWh;                   // Laden aus dem AC-Netz ist kein Hausverbrauch
     if (l >= 0) t.load = l;
   }
-  if (t.load > 1 && !isnan(t.imp)) t.autarkie = constrain((1.0f - t.imp / t.load) * 100.0f, 0.0f, 100.0f);
+  t.impHouse = t.imp;
+  if (gridChg && !isnan(t.imp)) {
+    t.gridBatt = dayS.gridBattWh;
+    t.impHouse = fmaxf(0.0f, t.imp - t.gridBatt);
+  }
+  if (t.load > 1 && !isnan(t.impHouse))
+    t.autarkie = constrain((1.0f - t.impHouse / t.load) * 100.0f, 0.0f, 100.0f);
   if (t.pv > 1 && !isnan(t.exp)) t.eigen = constrain((1.0f - t.exp / t.pv) * 100.0f, 0.0f, 100.0f);
   t.valid = true;
   today = t;
@@ -470,6 +506,20 @@ static void dayUpdate() {
       if (!isnan(flow.pAkku)) {
         if (flow.pAkku > 0) dayS.battOutWh += flow.pAkku * dtH;
         else dayS.battInWh += -flow.pAkku * dtH;
+      }
+      // Batterie laedt aus dem AC-Netz: Wechselrichter nimmt Leistung auf. Immer mitzaehlen,
+      // damit das Umschalten der Einstellung sofort fuer den ganzen Tag gilt.
+      if (!isnan(flow.pAkku) && flow.pAkku < -50) {
+        // AC-Aufnahme: aus der AC-Leistung des WR (< 0) oder aus der DC-Bilanz
+        // (Ladung groesser als PV) – das groessere gilt, falls P fehlt oder anders zaehlt
+        float acIn = fmaxf(0.0f, -(flow.pAkku + (isnan(flow.pPv) ? 0 : flow.pPv)));
+        if (!isnan(flow.pInv)) acIn = fmaxf(acIn, -flow.pInv);
+        acIn = fminf(acIn, -flow.pAkku);             // nie mehr als die Ladeleistung
+        if (acIn > 0) {
+          dayS.acInWh += acIn * dtH;
+          float gridIn = isnan(flow.pGrid) ? 0 : fmaxf(0.0f, flow.pGrid);
+          dayS.gridBattWh += fminf(acIn, gridIn) * dtH;   // Rest kam z. B. vom zweiten WR
+        }
       }
     }
   }
@@ -656,6 +706,7 @@ static bool readPowerFlow(const String& host, FlowData& n) {
   n.pLoad = jd(site["P_Load"]);
   n.battStandby = site["BatteryStandby"].as<bool>();
   n.eInvTotal = NAN;
+  n.pInv = NAN;
   for (JsonPairConst kv : d["Inverters"].as<JsonObjectConst>()) {
     JsonObjectConst inv = kv.value().as<JsonObjectConst>();
     double soc = jd(inv["SOC"]);
@@ -663,6 +714,8 @@ static bool readPowerFlow(const String& host, FlowData& n) {
     n.battMode = js(inv["Battery_Mode"]);
     double e = jd(inv["E_Total"]);
     if (!isnan(e)) n.eInvTotal = isnan(n.eInvTotal) ? e : n.eInvTotal + e;
+    double p = jd(inv["P"]);
+    if (!isnan(p)) n.pInv = isnan(n.pInv) ? p : n.pInv + p;
   }
   if (!isnan(n.pAkku)) n.hasBatt = true;
   n.nSec = 0;
@@ -1695,8 +1748,8 @@ static void drawDetailLoad() {
   boxTitle(R_DR, "Heute", C_ACC_BLUE);
   y = R_DR.y + 76;
   y = detailEnergy(R_DR, y, "Verbrauch", today.load);
-  y = detailEnergy(R_DR, y, "davon aus dem Netz", today.imp);
-  y = detailRow(R_DR, y, "Autarkie", isnan(today.autarkie) ? String("--") : String((int)lroundf(today.autarkie)), "%");
+  y = detailEnergy(R_DR, y, "davon aus dem Netz", gridChg ? today.impHouse : today.imp);
+  y = detailRow(R_DR, y, gridChg ? "Autarkie ohne Netzladung" : "Autarkie", isnan(today.autarkie) ? String("--") : String((int)lroundf(today.autarkie)), "%");
   y = detailRow(R_DR, y, "Eigenverbrauch", isnan(today.eigen) ? String("--") : String((int)lroundf(today.eigen)), "%");
 }
 
@@ -1732,6 +1785,7 @@ static void drawDetailGrid() {
   if (!isnan(flow.pGrid) && fabsf(flow.pGrid) >= FLOW_MIN_W) gname = flow.pGrid > 0 ? "Bezug jetzt" : "Einspeisung jetzt";
   y = detailPower(R_DR, y, gname, flow.pGrid, gridColor());
   y = detailEnergy(R_DR, y, "Bezug heute", today.imp);
+  if (gridChg) y = detailEnergy(R_DR, y, "davon in die Batterie", today.gridBatt);
   y = detailEnergy(R_DR, y, "Einspeisung heute", today.exp);
   y = detailEnergy(R_DR, y, "Bezug gesamt", meter.valid ? (float)meter.eImp : NAN);
   y = detailEnergy(R_DR, y, "Einspeisung gesamt", meter.valid ? (float)meter.eExp : NAN);
@@ -1813,6 +1867,7 @@ static bool     edShowPass = false;
 static bool     edIpFixed = false;
 static uint32_t edPoll = 5000;
 static bool     edAnim = true;
+static bool     edGridChg = false;
 static bool     picPage = false;
 static bool     nightPage = false;
 enum KbLayer { KB_LOWER, KB_UPPER, KB_SYM };
@@ -1976,6 +2031,7 @@ static void openSettings(int tab) {
   edIpFixed = ipFixed;
   edPoll = pollMs;
   edAnim = animOn;
+  edGridChg = gridChg;
   picPage = false;
   nightPage = false;
   edTab = tab;
@@ -2327,8 +2383,16 @@ static void drawSettingsBody() {
     text("Flussrichtung", M + 6, optBtn(1, 0).y + 44, C_DIM, ML_DATUM);
     button(optBtn(1, 0), "Pfeile", !edAnim);
     button(optBtn(1, 1), "Laufende Punkte", edAnim);
+    useFont(fT);
+    text("Netzladung", M + 6, optBtn(2, 0).y + 16, C_TEXT, ML_DATUM);
     useFont(fXS);
-    text("Ausrichtung gilt sofort – Bild und Touch drehen sich mit.", M + 6, 480 - M - 10, C_DIM, BL_DATUM);
+    text("Batterie lädt auch", M + 6, optBtn(2, 0).y + 44, C_DIM, ML_DATUM);
+    text("aus dem Netz", M + 6, optBtn(2, 0).y + 64, C_DIM, ML_DATUM);
+    button(optBtn(2, 0), "Nein", !edGridChg);
+    button(optBtn(2, 1), "Ja", edGridChg);
+    useFont(fXS);
+    text("Ausrichtung gilt sofort – Netzladung zählt bei Ja nicht als Verbrauch", M + 6,
+         480 - M - 10, C_DIM, BL_DATUM);
   } else {
     useFont(fT);
     text("Abfrage alle", M + 6, pollBtn(0).y + 30, C_TEXT, ML_DATUM);
@@ -2431,6 +2495,7 @@ static void saveSettings() {
   ipDns  = edVal[8];
   pollMs = edPoll;
   animOn = edAnim;
+  gridChg = edGridChg;
 
   prefs.begin(NVS_NS, false);
   prefs.putString("host", froniusHost);
@@ -2445,6 +2510,7 @@ static void saveSettings() {
   prefs.putString("dns", ipDns);
   prefs.putUInt("poll", pollMs);
   prefs.putBool("anim2", animOn);
+  prefs.putBool("gridchg", gridChg);
   prefs.end();
   Serial.printf("Einstellungen gespeichert: Fronius %s, WLAN %s, IP %s\n", froniusHost.c_str(),
                 wifiSsid.c_str(), ipFixed ? ipAddr.c_str() : "DHCP");
@@ -2592,6 +2658,8 @@ static void settingsTap(int x, int y) {
     if (hit(optBtn(0, 1), x, y)) { setRotation(true); return; }
     if (hit(optBtn(1, 0), x, y)) { edAnim = false; return; }
     if (hit(optBtn(1, 1), x, y)) { edAnim = true; return; }
+    if (hit(optBtn(2, 0), x, y)) { edGridChg = false; return; }
+    if (hit(optBtn(2, 1), x, y)) { edGridChg = true; return; }
   } else if (edTab == 4) {
     for (int i = 0; i < 5; i++) if (hit(pollBtn(i), x, y)) { edPoll = POLL_CHOICES[i]; return; }
     if (hit(R_PIC, x, y)) { picPage = true; return; }

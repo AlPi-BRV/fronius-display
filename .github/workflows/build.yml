@@ -97,7 +97,7 @@ jobs:
         with:
           name: fronius-display-5zoll-${{ env.VERSION }}-test
           path: release/fronius-display-5zoll-*
-          retention-days: 14
+          retention-days: 3
 
       - name: Testdateien 7 Zoll (Entwicklungszweig)
         if: github.event_name == 'push'
@@ -105,7 +105,7 @@ jobs:
         with:
           name: fronius-display-7zoll-${{ env.VERSION }}-test
           path: release/fronius-display-7zoll-*
-          retention-days: 14
+          retention-days: 3
 
       - name: Release anlegen
         if: github.ref_type == 'tag'
