@@ -1,5 +1,10 @@
 # Fronius-Display
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-%E2%98%95-yellow)](https://buymeacoffee.com/alpi_brv)
+
+<a href="https://buymeacoffee.com/alpi_brv"><img src="docs/images/coffee.png" alt="Buy me a coffee" width="200"></a>
+
 Eigenständiges Touch-Display für **Fronius-Wechselrichter** (getestet: Symo GEN24) –
 auf einem günstigen ESP32-S3-Display, ohne ioBroker, Home Assistant oder Server.
 Das Display holt sich die Werte per WLAN direkt vom Wechselrichter (Fronius Solar API).
