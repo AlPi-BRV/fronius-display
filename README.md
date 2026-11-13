@@ -99,6 +99,12 @@ des Wechselrichters eintragen, *Speichern*.
 - Strings (MPPT) über Modbus TCP
 - Wallbox (Wattpilot) mit eigener Abfrage
 
+### Bewusst nicht geplant
+
+Einbindung weiterer Geräte (Tasmota, Shelly, Lesekopf …), Wetter, Prognosen, Cloud-Dienste.
+Das Display spricht nur mit dem Fronius-Wechselrichter – dafür ohne Server und ohne Internet
+für den Betrieb.
+
 ## Wie die Tageswerte entstehen
 
 Der GEN24 liefert keine Tageswerte (`E_Day` ist leer). Das Display rechnet selbst:
