@@ -63,15 +63,19 @@ des Wechselrichters eintragen, *Speichern*.
   um den Wechselrichter; Pfeile (oder auf Wunsch laufende Punkte) zeigen die Flussrichtung
 - **Antippen öffnet Details:**
   - PV – Aufteilung je Wechselrichter (z. B. GEN24 + zusätzlicher Wechselrichter
-    über Fronius Smart Meter), später Strings über Modbus
+    über Fronius Smart Meter oder zweiter Fronius per IP)
   - Netz – Phasen L1–L3 mit Spannung, Strom, Leistung, Frequenz
   - Batterie – Ladestand, Lade-/Entladeleistung, noch entnehmbare Energie, „leer in ca. …“ /
     „voll in ca. …“. Beim GEN24 werden Entladegrenze (min_soc) und Zustand der Batterie (SOH)
     automatisch berücksichtigt: nutzbar = Kapazität × SOH × (Ladestand − Entladegrenze)
   - Verbraucher – Haus, später Wallbox (Wattpilot) und Heizstab (Ohmpilot) getrennt
 - **Tageswerte:** PV-Ertrag, Verbrauch, Netzbezug, Einspeisung, Batterie geladen,
-  Autarkie, Eigenverbrauch – aus den Zählerständen selbst berechnet
-  (der GEN24 liefert keine Tageswerte)
+  Autarkie, Eigenverbrauch – aus den Zählerständen von Wechselrichter und Smart Meter
+  selbst berechnet (der GEN24 liefert keine Tageswerte). Stimmen auch, wenn das Display
+  zwischendurch aus war
+- **Zweiter Fronius-Wechselrichter (optional):** Hat die Anlage zwei Fronius-Wechselrichter
+  (z. B. zwei GEN24, einer mit Batterie und Smart Meter, einer ohne), kann im Reiter Fronius
+  die IP des zweiten eingetragen werden – siehe [Zwei Fronius-Wechselrichter](#zwei-fronius-wechselrichter)
 - **Ausrichtung wählbar:** USB-Anschluss links oder rechts (Drehung um 180°) –
   wirkt sofort, Bild und Touch drehen sich mit
 - **Einrichtung komplett am Display:** WLAN, feste IP oder DHCP, IP des Wechselrichters,
@@ -87,7 +91,8 @@ des Wechselrichters eintragen, *Speichern*.
 - **Netzladung:** Wird die Batterie auch aus dem Netz geladen (z. B. nachts mit dynamischem Tarif
   oder bei einer Zwangsladung), unter Einstellungen → Anzeige → Netzladung „Ja“ wählen. Dann zählt
   die Ladung aus dem Netz nicht als Hausverbrauch, und die Autarkie wird ohne den Netzstrom für die
-  Batterie gerechnet. Auf der Netz-Seite steht zusätzlich „davon in die Batterie“
+  Batterie gerechnet. Auf der Netz-Seite steht zusätzlich „davon in die Batterie“, auf der
+  Verbraucher-Seite „davon direkt aus dem Netz“ (Netzbezug ohne die Ladung der Batterie)
 - **Störungen auf einen Blick:** Ist das WLAN weg, erscheint ein großes durchgestrichenes WLAN-Symbol,
   antwortet der Wechselrichter nicht, das durchgestrichene Wechselrichter-Symbol. Veraltete Werte werden
   so lange ausgeblendet. Das Display verbindet sich selbst neu – auch wenn der Router nach einem
@@ -96,14 +101,13 @@ des Wechselrichters eintragen, *Speichern*.
 ### Geplant
 
 - Statistik für Tag, Monat, Jahr; optional mit **SD-Karte** auch Tagesverläufe
-- Strings (MPPT) über Modbus TCP
 - Wallbox (Wattpilot) mit eigener Abfrage
 
 ### Bewusst nicht geplant
 
 Einbindung weiterer Geräte (Tasmota, Shelly, Lesekopf …), Wetter, Prognosen, Cloud-Dienste.
-Das Display spricht nur mit dem Fronius-Wechselrichter – dafür ohne Server und ohne Internet
-für den Betrieb.
+Das Display spricht nur mit dem Fronius-Wechselrichter (auf Wunsch zusätzlich mit einem zweiten
+Fronius) – dafür ohne Server und ohne Internet für den Betrieb.
 
 ## Wie die Tageswerte entstehen
 
@@ -114,13 +118,37 @@ Der GEN24 liefert keine Tageswerte (`E_Day` ist leer). Das Display rechnet selbs
 | Netzbezug, Einspeisung | Zählerstände des Smart Meters am Netzanschluss | genau |
 | Weitere Wechselrichter (z. B. Hoymiles) | Zählerstand ihres Smart Meters | genau |
 | Verbrauch, Autarkie | Zähler: Wechselrichter + weitere WR + Bezug − Einspeisung | genau |
-| PV des Fronius, Batterie geladen/entladen | Leistung × Zeit, solange das Display läuft | Näherung |
+| PV des Fronius (alle Strings), Batterie geladen/entladen | Zähler des Wechselrichters (GEN24, `/components/readable`) | genau |
+| Zweiter Fronius-Wechselrichter (IP eingetragen) | sein Zähler `E_Total` | genau |
+| PV, falls die Zähler fehlen | Tageswert `E_Day` (SnapINverter), sonst Leistung × Zeit, solange das Display läuft | Näherung |
 | Netzladung der Batterie (nur bei „Netzladung: Ja“) | Leistung × Zeit, solange das Display läuft | Näherung |
 
 Die Stände des Tagesbeginns werden alle 5 Minuten im Flash gesichert und überstehen
 Stromausfall, Neustart und Updates. Die zählerbasierten Werte stimmen auch, wenn das
 Display zwischendurch aus war; bei den Näherungswerten fehlt die Zeit ohne Strom.
 Startet das Display mitten am Tag zum ersten Mal, zeigt „Heute“ die Werte *seit* dieser Uhrzeit.
+
+## Zwei Fronius-Wechselrichter
+
+Der Fronius mit Smart Meter (und Batterie) kennt einen zweiten Fronius-Wechselrichter nicht.
+Dessen Erzeugung erscheint dort nur als „weniger Netzbezug“ – der Hausverbrauch ist zu klein,
+tagsüber zeigt der Wechselrichter ihn sogar als *Erzeugung* an.
+
+**Empfohlen: zweiter Smart Meter.** Ein Fronius Smart Meter am Ausgang des zweiten
+Wechselrichters, beim ersten als *Erzeuger* (Kategorie Wechselrichter) eingerichtet – genau wie
+bei einem Fremd-Wechselrichter (z. B. Hoymiles). Dann rechnet schon der Wechselrichter selbst
+richtig, auch in der Fronius-App, und das Display braucht nichts weiter. Kosten etwa 200 €
+(Smart Meter TS) bzw. 300 € (Smart Meter IP), plus Einbau.
+
+**Ohne zweiten Smart Meter:** Im Reiter **Fronius** unter *IP 2. WR (optional)* die IP des
+zweiten Wechselrichters eintragen (Solar API auch dort einschalten). Das Display fragt ihn
+zusätzlich ab, zählt seine Leistung zur PV-Erzeugung, rechnet den Hausverbrauch richtig und
+nimmt seinen Zählerstand für die Tageswerte. *Verbindung testen* prüft beide.
+
+- Nur eintragen, wenn der zweite **nicht** schon über einen Smart Meter beim ersten erscheint –
+  sonst zählt er doppelt.
+- Gedacht für einen zweiten Wechselrichter **ohne Batterie**; Batterie und Netz kommen vom ersten.
+- Antwortet der zweite nicht, zeigt das Display „--“ für ihn und fragt jede Minute neu.
 
 ## Voraussetzungen am Wechselrichter
 
@@ -142,7 +170,7 @@ Erscheint dort JSON, ist alles bereit.
 
 | Reiter | Inhalt |
 |---|---|
-| Fronius | IP des Wechselrichters, PV-Leistung (kWp), Batterie (kWh), *Verbindung testen* |
+| Fronius | IP des Wechselrichters, IP eines zweiten Fronius (optional), PV-Leistung (kWp), Batterie (kWh), *Verbindung testen* |
 | WLAN | Netz suchen und wählen, WLAN-Passwort |
 | IP | Automatisch (DHCP) oder feste IP |
 | Anzeige | Ausrichtung (normal / 180° gedreht), Flussrichtung als Pfeile oder laufende Punkte, Netzladung der Batterie Nein/Ja |

@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.12"
+#define FW_VERSION  "0.1.13"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -173,6 +173,7 @@ static uint16_t mix565(uint16_t a, uint16_t b, float t) {
 // ---------------------------------------------------------------
 static Preferences prefs;
 static String   froniusHost = FRONIUS_HOST;
+static String   froniusHost2;              // optional: zweiter Fronius-Wechselrichter (ohne eigenen Smart Meter)
 static String   wifiSsid   = WIFI_SSID;
 static String   wifiPass   = WIFI_PASS;
 static bool     ipFixed    = false;
@@ -207,6 +208,7 @@ static uint8_t dimDuty() { uint8_t d = brightDuty(brightPct); return d < BRIGHT_
 static void loadSettings() {
   prefs.begin(NVS_NS, true);
   froniusHost = prefs.getString("host", froniusHost);
+  froniusHost2 = prefs.getString("host2", "");
   wifiSsid   = prefs.getString("ssid", wifiSsid);
   wifiPass   = prefs.getString("wpass", wifiPass);
   ipFixed    = prefs.getBool("ipfix", false);
@@ -268,6 +270,7 @@ struct FlowData {
   bool   battStandby = false;
   double eInvTotal = NAN;          // Zaehler des Fronius-Wechselrichters in Wh
   float  pInv = NAN;               // AC-Leistung des Wechselrichters (< 0 = nimmt aus dem Netz auf)
+  double eDay = NAN;               // Site.E_Day in Wh (nur SnapINverter/Datamanager, GEN24 liefert null)
   int    nSec = 0;
   SecMeter sec[4];
   int    nOhm = 0;                 // Ohmpilot (Heizstab)
@@ -304,12 +307,27 @@ struct BattInfo {
   float  minSoc = NAN;             // min_soc – darunter entlaedt der Wechselrichter nicht
   float  maxSoc = NAN;             // max_soc
   float  soh = NAN;                // BAT_VALUE_STATE_OF_HEALTH_RELATIVE_U16 in %
+  // Zaehler des Wechselrichters (GEN24) in Wh – fuer genaue Tageswerte
+  double cPv = NAN;                // PV (DC), Summe aller Strings
+  double cBattIn = NAN;            // Batterie geladen
+  double cBattOut = NAN;           // Batterie entladen
+};
+
+// Optionaler zweiter Fronius-Wechselrichter (eigene IP, z. B. zweiter GEN24 ohne Batterie).
+// Der erste kennt ihn nicht: dessen P_Load ist um die Leistung des zweiten zu klein.
+struct Inv2Data {
+  bool     valid = false;          // aktuelle Werte da
+  float    p = NAN;                // AC-Leistung (Inverters.P)
+  float    pPv = NAN;
+  double   eTotal = NAN;           // Zaehler in Wh (bleibt erhalten, wenn er kurz nicht antwortet)
+  uint32_t lastOk = 0;
 };
 
 static FlowData    flow;
 static MeterData   meter;
 static StorageData storage;
 static BattInfo    battInfo;
+static Inv2Data    inv2;
 static uint32_t    nextStorageFetch = 0;
 static uint32_t    nextBattInfoFetch = 0;
 static uint32_t  lastPoll = 0;
@@ -349,6 +367,7 @@ static float pvGenW() {            // weitere Wechselrichter (Smart Meter, Kateg
   float s = 0;
   for (int i = 0; i < flow.nSec; i++)
     if (flow.sec[i].gen && !isnan(flow.sec[i].p)) s += fabsf(flow.sec[i].p);
+  if (inv2.valid && !isnan(inv2.p) && inv2.p > 0) s += inv2.p;   // zweiter Fronius
   return s;
 }
 static float pvTotalW() {
@@ -369,8 +388,11 @@ static float loadW() {
 // Tageswerte – der GEN24 liefert keine E_Day-Werte, darum selbst rechnen:
 //   - Netzbezug, Einspeisung, weitere Wechselrichter: Zaehlerstaende der
 //     Smart Meter, Stand um Mitternacht gemerkt (genau)
-//   - PV des Fronius, Verbrauch, Batterie: Leistung ueber die Zeit
-//     aufsummiert, solange das Display laeuft (Naeherung)
+//   - zweiter Fronius (eigene IP): sein Zaehler E_Total (genau)
+//   - PV des Fronius, Batterie geladen/entladen: Zaehler des Wechselrichters aus
+//     /components/readable (genau, ab 0.1.13). Fehlen sie (Symo Hybrid, SnapINverter):
+//     PV aus Site.E_Day, sonst Leistung ueber die Zeit, solange das Display laeuft
+//   - Verbrauch: aus den Zaehlern, ersatzweise Leistung ueber die Zeit
 //   - Netzladung der Batterie (Einstellung "Netzladung"): E_Total zaehlt nur, was der
 //     Wechselrichter abgibt, nicht was er zum Laden aus dem Netz aufnimmt. Diese Energie
 //     steckt im Netzbezug und wuerde als Hausverbrauch zaehlen. Mit "Ja" wird sie
@@ -384,14 +406,25 @@ struct DayStoreV1 {               // Aufbau bis 0.1.11 (zum Uebernehmen nach dem
   double   eImp = NAN, eExp = NAN, eGen = NAN, eInv = NAN;
   float    pvWh = 0, loadWh = 0, battInWh = 0, battOutWh = 0;
 };
+struct DayStoreV2 {               // Aufbau 0.1.12
+  uint32_t day = 0;
+  uint16_t startMin = 0;
+  uint16_t ver = 2;
+  double   eImp = NAN, eExp = NAN, eGen = NAN, eInv = NAN;
+  float    pvWh = 0, loadWh = 0, battInWh = 0, battOutWh = 0;
+  float    acInWh = 0;
+  float    gridBattWh = 0;
+};
 struct DayStore {
   uint32_t day = 0;               // JJJJMMTT
   uint16_t startMin = 0;          // Minute des Tages, ab der gezaehlt wird (0 = ganzer Tag)
-  uint16_t ver = 2;
+  uint16_t ver = 3;
   double   eImp = NAN, eExp = NAN, eGen = NAN, eInv = NAN;   // Zaehlerstaende am Tagesbeginn
   float    pvWh = 0, loadWh = 0, battInWh = 0, battOutWh = 0;
   float    acInWh = 0;            // vom Wechselrichter aus dem AC-Netz aufgenommen (Batterie laden)
   float    gridBattWh = 0;        // davon aus dem oeffentlichen Netz
+  double   cPv = NAN, cBattIn = NAN, cBattOut = NAN;          // Zaehler des Wechselrichters (Wh)
+  double   eInv2 = NAN;           // Zaehler des zweiten Fronius (Wh)
 };
 static DayStore dayS;
 static uint32_t lastIntegMs = 0;
@@ -401,6 +434,9 @@ struct Today {
   bool  valid = false;
   float pv = NAN, pvFr = NAN, pvGen = NAN, load = NAN, imp = NAN, exp = NAN;
   float battIn = NAN, battOut = NAN, invCounter = NAN;
+  float pvInv2 = NAN;              // zweiter Fronius
+  uint8_t pvSrc = 0;               // PV Fronius: 0 Leistung x Zeit, 1 E_Day, 2 Zaehler
+  bool  battCnt = false;           // Batterie aus Zaehlern
   float gridBatt = NAN;            // Batterie aus dem Netz geladen (nur mit Einstellung Netzladung)
   float impHouse = NAN;            // Netzbezug fuers Haus (ohne Netzladung)
   float autarkie = NAN, eigen = NAN;
@@ -427,8 +463,17 @@ static void dayLoad() {
   prefs.begin(NVS_NS, true);
   DayStore d;
   size_t len = prefs.getBytesLength("day");
-  if (len == sizeof(d) && prefs.getBytes("day", &d, sizeof(d)) == sizeof(d) && d.ver == 2) {
+  if (len == sizeof(d) && prefs.getBytes("day", &d, sizeof(d)) == sizeof(d) && d.ver == 3) {
     dayS = d;
+  } else if (len == sizeof(DayStoreV2)) {              // Stand von 0.1.12 uebernehmen
+    DayStoreV2 o;
+    if (prefs.getBytes("day", &o, sizeof(o)) == sizeof(o) && o.ver == 2) {
+      d.day = o.day; d.startMin = o.startMin;
+      d.eImp = o.eImp; d.eExp = o.eExp; d.eGen = o.eGen; d.eInv = o.eInv;
+      d.pvWh = o.pvWh; d.loadWh = o.loadWh; d.battInWh = o.battInWh; d.battOutWh = o.battOutWh;
+      d.acInWh = o.acInWh; d.gridBattWh = o.gridBattWh;
+      dayS = d;
+    }
   } else if (len == sizeof(DayStoreV1)) {              // Stand von 0.1.11 uebernehmen
     DayStoreV1 o;
     if (prefs.getBytes("day", &o, sizeof(o)) == sizeof(o) && o.ver == 1) {
@@ -448,11 +493,29 @@ static void computeToday() {
   t.load   = dayS.loadWh;
   t.battIn = dayS.battInWh;
   t.battOut = dayS.battOutWh;
+  // Zaehler des Wechselrichters: Tageswert = Stand jetzt - Stand am Tagesbeginn.
+  // Unplausible Spruenge (Zaehler getauscht, Fehlablesung) -> Ersatzweg.
+  auto cnt = [](double now, double start, float& out) {
+    if (isnan(now) || isnan(start)) return false;
+    double d = now - start;
+    if (d < 0 || d > 500000.0) return false;
+    out = (float)d;
+    return true;
+  };
+  if (cnt(battInfo.cPv, dayS.cPv, t.pvFr)) t.pvSrc = 2;
+  else if (!isnan(flow.eDay) && flow.eDay >= 0) { t.pvFr = (float)flow.eDay; t.pvSrc = 1; }
+  float bi, bo;
+  if (cnt(battInfo.cBattIn, dayS.cBattIn, bi) && cnt(battInfo.cBattOut, dayS.cBattOut, bo)) {
+    t.battIn = bi;
+    t.battOut = bo;
+    t.battCnt = true;
+  }
   if (meter.valid && !isnan(dayS.eImp)) {
     t.imp = (float)(meter.eImp - dayS.eImp);
     t.exp = (float)(meter.eExp - dayS.eExp);
   }
   t.pvGen = (meter.genValid && !isnan(dayS.eGen)) ? (float)(meter.eGen - dayS.eGen) : 0;
+  if (froniusHost2.length() && cnt(inv2.eTotal, dayS.eInv2, t.pvInv2)) t.pvGen += t.pvInv2;
   if (!isnan(flow.eInvTotal) && !isnan(dayS.eInv)) t.invCounter = (float)(flow.eInvTotal - dayS.eInv);
   t.pv = t.pvFr + t.pvGen;
   // Verbrauch aus Zaehlerstaenden (stimmt auch, wenn das Display zwischendurch aus war):
@@ -494,6 +557,13 @@ static void dayUpdate() {
   if (isnan(dayS.eImp) && meter.valid) { dayS.eImp = meter.eImp; dayS.eExp = meter.eExp; changed = true; }
   if (isnan(dayS.eGen) && meter.genValid) { dayS.eGen = meter.eGen; changed = true; }
   if (isnan(dayS.eInv) && !isnan(flow.eInvTotal)) { dayS.eInv = flow.eInvTotal; changed = true; }
+  if (isnan(dayS.cPv) && !isnan(battInfo.cPv)) { dayS.cPv = battInfo.cPv; changed = true; }
+  if (isnan(dayS.cBattIn) && !isnan(battInfo.cBattIn) && !isnan(battInfo.cBattOut)) {
+    dayS.cBattIn = battInfo.cBattIn;
+    dayS.cBattOut = battInfo.cBattOut;
+    changed = true;
+  }
+  if (isnan(dayS.eInv2) && froniusHost2.length() && !isnan(inv2.eTotal)) { dayS.eInv2 = inv2.eTotal; changed = true; }
   if (changed) daySave();
 
   // Leistung * Zeit; groessere Luecken (Display aus, Einstellungen offen) zaehlen nicht
@@ -705,6 +775,7 @@ static bool readPowerFlow(const String& host, FlowData& n) {
   n.pGrid = jd(site["P_Grid"]);
   n.pLoad = jd(site["P_Load"]);
   n.battStandby = site["BatteryStandby"].as<bool>();
+  n.eDay = jd(site["E_Day"]);
   n.eInvTotal = NAN;
   n.pInv = NAN;
   for (JsonPairConst kv : d["Inverters"].as<JsonObjectConst>()) {
@@ -804,9 +875,10 @@ static bool readStorage(const String& host, StorageData& n) {
 }
 
 // /components/readable ist ca. 15 kB gross und enthaelt das Typenschild als
-// JSON-Text im JSON ("nameplate": "{\"capacity_wh\":12800,...}"). Statt alles zu
-// parsen, wird der Datenstrom nach den wenigen benoetigten Schluesseln durchsucht –
-// so braucht es fast keinen Speicher.
+// JSON-Text im JSON ("nameplate": "{\"capacity_wh\":12800,...}") sowie die
+// Zaehler des Wechselrichters (in Ws). Statt alles zu parsen, wird der Datenstrom
+// nach den wenigen benoetigten Schluesseln durchsucht – so braucht es fast keinen
+// Speicher. Gibt es die Seite nicht (SnapINverter, aeltere Firmware), bleibt alles NAN.
 static bool readBattInfo(const String& host, BattInfo& n) {
   if (WiFi.status() != WL_CONNECTED || host.length() == 0) return false;
   HTTPClient http;
@@ -820,13 +892,22 @@ static bool readBattInfo(const String& host, BattInfo& n) {
     http.end();
     return false;
   }
-  static const char* const KEYS[4] = { "\"BAT_VALUE_STATE_OF_HEALTH_RELATIVE_U16\"", "min_soc", "max_soc",
-                                       "capacity_wh" };
-  float val[4] = { NAN, NAN, NAN, NAN };
+  // Schluessel ohne Anfuehrungszeichen: einige stehen im Typenschild als \"...\" (escaped)
+  enum { K_SOH, K_MINSOC, K_MAXSOC, K_CAP, K_PV1, K_PV2, K_PV3, K_PV4, K_BIN, K_BOUT, NK };
+  static const char* const KEYS[NK] = { "\"BAT_VALUE_STATE_OF_HEALTH_RELATIVE_U16\"", "min_soc", "max_soc",
+                                        "capacity_wh",
+                                        "PV_ENERGYACTIVE_ACTIVE_SUM_01\"", "PV_ENERGYACTIVE_ACTIVE_SUM_02\"",
+                                        "PV_ENERGYACTIVE_ACTIVE_SUM_03\"", "PV_ENERGYACTIVE_ACTIVE_SUM_04\"",
+                                        "BAT_ENERGYACTIVE_ACTIVECHARGE_SUM_01\"",
+                                        "BAT_ENERGYACTIVE_ACTIVEDISCHARGE_SUM_01\"" };
+  static size_t keyLen[NK] = { 0 };
+  if (!keyLen[0]) for (int k = 0; k < NK; k++) keyLen[k] = strlen(KEYS[k]);
+  double val[NK];
+  for (int k = 0; k < NK; k++) val[k] = NAN;
   char win[48];
   size_t wl = 0;
   int want = -1;
-  char num[16];
+  char num[24];
   int nl = 0;
   WiFiClient* st = http.getStreamPtr();
   uint32_t t0 = millis(), lastData = millis();
@@ -841,7 +922,7 @@ static bool readBattInfo(const String& host, BattInfo& n) {
     if (want >= 0) {
       bool digit = c >= '0' && c <= '9';
       if (digit || (nl > 0 && (c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')) || (nl == 0 && c == '-')) {
-        if (nl < 15) num[nl++] = c;
+        if (nl < (int)sizeof(num) - 1) num[nl++] = c;
         continue;
       }
       if (nl == 0 && (c == ' ' || c == '"' || c == '\\' || c == ':')) continue;
@@ -852,20 +933,29 @@ static bool readBattInfo(const String& host, BattInfo& n) {
     }
     if (wl == sizeof(win)) { memmove(win, win + 1, sizeof(win) - 1); wl--; }
     win[wl++] = c;
-    for (int k = 0; k < 4; k++) {
-      size_t kl = strlen(KEYS[k]);
+    if (c != '"' && c != 'h' && c != 'c' && c != '6') continue;   // alle Schluessel enden auf eines davon
+    for (int k = 0; k < NK; k++) {
+      size_t kl = keyLen[k];
       if (wl >= kl && memcmp(win + wl - kl, KEYS[k], kl) == 0) { want = k; nl = 0; break; }
     }
   }
   http.end();
-  n.soh    = val[0];
-  n.minSoc = val[1];
-  n.maxSoc = val[2];
-  n.capWh  = val[3];
-  n.valid  = !isnan(val[0]) || !isnan(val[1]) || !isnan(val[3]);
+  n.soh    = val[K_SOH];
+  n.minSoc = val[K_MINSOC];
+  n.maxSoc = val[K_MAXSOC];
+  n.capWh  = val[K_CAP];
+  n.valid  = !isnan(val[K_SOH]) || !isnan(val[K_MINSOC]) || !isnan(val[K_CAP]);
+  // Zaehler: Ws -> Wh; PV als Summe aller Strings
+  double pv = NAN;
+  for (int k = K_PV1; k <= K_PV4; k++)
+    if (!isnan(val[k]) && val[k] >= 0) pv = (isnan(pv) ? 0 : pv) + val[k] / 3600.0;
+  n.cPv = pv;
+  n.cBattIn  = isnan(val[K_BIN])  ? NAN : val[K_BIN] / 3600.0;
+  n.cBattOut = isnan(val[K_BOUT]) ? NAN : val[K_BOUT] / 3600.0;
   Serial.printf("Speicher-Typenschild: %.0f Wh, SOC min %.0f / max %.0f %%, SOH %.0f %%\n", n.capWh, n.minSoc,
                 n.maxSoc, n.soh);
-  return n.valid;
+  Serial.printf("Zaehler WR: PV %.0f Wh, Batterie geladen %.0f / entladen %.0f Wh\n", n.cPv, n.cBattIn, n.cBattOut);
+  return n.valid || !isnan(n.cPv) || !isnan(n.cBattIn);
 }
 
 // ---------------------------------------------------------------
@@ -886,6 +976,8 @@ struct PollResult {
   StorageData st;
   bool binfOk = false;
   BattInfo bi;
+  bool inv2Ok = false;             // zweiter Fronius hat geantwortet
+  FlowData f2;
 };
 static SemaphoreHandle_t netMx = nullptr;
 static SemaphoreHandle_t dataMx = nullptr;
@@ -905,6 +997,13 @@ static String hostCopy() {
   if (dataMx) xSemaphoreGive(dataMx);
   return h;
 }
+static String host2Copy() {
+  if (dataMx) xSemaphoreTake(dataMx, portMAX_DELAY);
+  String h = froniusHost2;
+  if (dataMx) xSemaphoreGive(dataMx);
+  return h;
+}
+static uint32_t nextInv2Fetch = 0;     // zweiter WR antwortet nicht: seltener fragen
 
 // Alle Abfragen nacheinander; der Speicher nur jede Minute
 static void fetchAll(const String& host, PollResult& r) {
@@ -916,10 +1015,19 @@ static void fetchAll(const String& host, PollResult& r) {
     r.storOk = readStorage(host, r.st);
     nextStorageFetch = millis() + (r.storOk ? 60000UL : 10UL * 60000UL);
   }
-  // Typenschild und Gesundheit aendern sich kaum – alle 10 min, ohne Antwort stuendlich
-  if (r.f.hasBatt && millis() >= nextBattInfoFetch) {
+  // Typenschild und Zaehler des Wechselrichters – jede Minute, ohne Antwort stuendlich
+  // (die Seite gibt es nur beim GEN24)
+  if (millis() >= nextBattInfoFetch) {
     r.binfOk = readBattInfo(host, r.bi);
-    nextBattInfoFetch = millis() + (r.binfOk ? 10UL * 60000UL : 60UL * 60000UL);
+    nextBattInfoFetch = millis() + (r.binfOk ? 60000UL : 60UL * 60000UL);
+  }
+  // zweiter Fronius: Leistung und Zaehler; antwortet er nicht, erst nach 1 min wieder
+  String h2 = host2Copy();
+  if (h2.length() && millis() >= nextInv2Fetch) {
+    int keep = lastHttp;                        // Meldungen beziehen sich auf den ersten WR
+    r.inv2Ok = readPowerFlow(h2, r.f2);
+    lastHttp = keep;
+    if (!r.inv2Ok) nextInv2Fetch = millis() + 60000UL;
   }
 }
 
@@ -930,6 +1038,17 @@ static void applyPoll(const PollResult& r) {
     if (r.meterOk) meter = r.m;
     if (r.storOk) storage = r.st;
     if (r.binfOk) battInfo = r.bi;
+    if (r.inv2Ok) {
+      inv2.p = r.f2.pInv;
+      inv2.pPv = r.f2.pPv;
+      if (!isnan(r.f2.eInvTotal)) inv2.eTotal = r.f2.eInvTotal;
+      inv2.lastOk = millis();
+    }
+    inv2.valid = froniusHost2.length() && inv2.lastOk && millis() - inv2.lastOk < 3UL * 60000UL;
+    // Der erste WR kennt den zweiten nicht: dessen Erzeugung fehlt in P_Load
+    // (P_Load wird dann sogar positiv). Hausverbrauch = P_Load(WR1) - P(WR2).
+    if (inv2.valid && !isnan(flow.pLoad) && !isnan(inv2.p) && inv2.p > 0)
+      flow.pLoad = fminf(flow.pLoad - inv2.p, 0.0f);
     failCount = 0;
     lastOkTime = uhrzeit();
     dayUpdate();
@@ -1714,6 +1833,8 @@ static void drawDetailPv() {
   y = detailPower(R_DL, y, "Fronius Wechselrichter", flow.pPv);
   for (int i = 0; i < flow.nSec; i++)
     if (flow.sec[i].gen) y = detailPower(R_DL, y, flow.sec[i].label, fabsf(flow.sec[i].p));
+  if (froniusHost2.length())
+    y = detailPower(R_DL, y, "2. Wechselrichter", inv2.valid && !isnan(inv2.p) ? fmaxf(inv2.p, 0.0f) : NAN);
   float pv = pvTotalW();
   canvas.drawFastHLine(R_DL.x + 18, y - 26, R_DL.w - 36, C_BTN);
   y = detailPower(R_DL, y, "Gesamt", pv, C_TEXT);
@@ -1724,11 +1845,17 @@ static void drawDetailPv() {
 
   boxTitle(R_DR, "Heute", C_SUN);
   y = R_DR.y + 76;
-  y = detailEnergy(R_DR, y, "Fronius (gerechnet)", today.pvFr);
-  if (meter.genValid) y = detailEnergy(R_DR, y, "Weitere Wechselrichter", today.pvGen);
+  y = detailEnergy(R_DR, y, "Fronius", today.pvFr);
+  if (froniusHost2.length()) y = detailEnergy(R_DR, y, "2. Wechselrichter", today.pvInv2);
+  if (meter.genValid)
+    y = detailEnergy(R_DR, y, froniusHost2.length() ? "Weitere (Smart Meter)" : "Weitere Wechselrichter",
+                     today.pvGen - (isnan(today.pvInv2) ? 0 : today.pvInv2));
   y = detailEnergy(R_DR, y, "Gesamt", today.pv);
   useFont(fXS);
-  boxNote(R_DR, R_DR.y + R_DR.h - 52, "Fronius: Leistung × Zeit, solange das Display läuft.");
+  boxNote(R_DR, R_DR.y + R_DR.h - 52,
+          today.pvSrc == 2 ? String("Fronius: Zähler des Wechselrichters (PV, alle Strings).")
+          : today.pvSrc == 1 ? String("Fronius: Tageswert des Wechselrichters.")
+                             : String("Fronius: Leistung × Zeit, solange das Display läuft."));
   text("Zähler Wechselrichter heute: " + (isnan(today.invCounter) ? String("--") : fmt(today.invCounter / 1000.0f, 1) + " kWh"),
        R_DR.x + 18, R_DR.y + R_DR.h - 28, C_DIM, ML_DATUM);
 }
@@ -1748,7 +1875,8 @@ static void drawDetailLoad() {
   boxTitle(R_DR, "Heute", C_ACC_BLUE);
   y = R_DR.y + 76;
   y = detailEnergy(R_DR, y, "Verbrauch", today.load);
-  y = detailEnergy(R_DR, y, "davon aus dem Netz", gridChg ? today.impHouse : today.imp);
+  y = detailEnergy(R_DR, y, gridChg ? "davon direkt aus dem Netz" : "davon aus dem Netz",
+                   gridChg ? today.impHouse : today.imp);
   y = detailRow(R_DR, y, gridChg ? "Autarkie ohne Netzladung" : "Autarkie", isnan(today.autarkie) ? String("--") : String((int)lroundf(today.autarkie)), "%");
   y = detailRow(R_DR, y, "Eigenverbrauch", isnan(today.eigen) ? String("--") : String((int)lroundf(today.eigen)), "%");
 }
@@ -1841,7 +1969,8 @@ static void drawDetailBatt() {
   y = detailEnergy(R_DR, y, "Heute geladen", today.battIn);
   y = detailEnergy(R_DR, y, "Heute entladen", today.battOut);
   boxNote(R_DR, R_DR.y + R_DR.h - 28, cap <= 0 ? String("Kapazität einstellen: Zahnrad > Fronius")
-                                                : String("Heute: Leistung × Zeit, solange das Display läuft."));
+                   : today.battCnt ? String("Heute: Zähler des Wechselrichters.")
+                                   : String("Heute: Leistung × Zeit, solange das Display läuft."));
 }
 
 static void drawDetail() {
@@ -1858,8 +1987,9 @@ static void drawDetail() {
 // Einstellungen – Reiter Fronius | WLAN | IP | Anzeige | System
 // ---------------------------------------------------------------
 // Felder: 0 IP Wechselrichter, 1 PV-Leistung kWp, 2 Batterie kWh,
-//         3 WLAN, 4 WLAN-Passwort, 5 feste IP, 6 Subnetz, 7 Gateway, 8 DNS
-static const int NF = 9;
+//         3 WLAN, 4 WLAN-Passwort, 5 feste IP, 6 Subnetz, 7 Gateway, 8 DNS,
+//         9 IP zweiter Wechselrichter (optional)
+static const int NF = 10;
 static String   edVal[NF];
 static int      edField = 0;
 static int      edTab = 0;
@@ -1879,7 +2009,10 @@ static String scanSsid[8];
 static int    scanRssi[8];
 
 static const char* const FIELD_LABEL[NF] = { "IP Wechselrichter", "PV-Leistung kWp", "Batterie kWh", "WLAN",
-                                             "WLAN-Passwort", "IP-Adresse", "Subnetz", "Gateway", "DNS" };
+                                             "WLAN-Passwort", "IP-Adresse", "Subnetz", "Gateway", "DNS",
+                                             "IP 2. WR (optional)" };
+// Reiter Fronius: Felder in dieser Reihenfolge
+static const int FRO_FIELDS[4] = { 0, 9, 1, 2 };
 static const int NTAB = 5;
 static const char* const TAB_NAME[NTAB] = { "Fronius", "WLAN", "IP", "Anzeige", "System" };
 
@@ -1907,9 +2040,9 @@ static Rect sideBtn(int i) {
   return { 800 - M - SIDE_BTN_W, FY0 + row * (FH + FG), SIDE_BTN_W, FH };
 }
 
-// Reiter Fronius und IP: links Felder, rechts Ziffernblock
-static Rect froField(int i) { return { M + 170, HEAD + 16 + i * 66, 300, 50 }; }
-static const Rect R_TEST = { M, HEAD + 16 + 3 * 66, 470, 56 };
+// Reiter Fronius und IP: links Felder, rechts Ziffernblock (froField: Zeile 0..3)
+static Rect froField(int row) { return { M + 170, HEAD + 12 + row * 60, 300, 48 }; }
+static const Rect R_TEST = { M, HEAD + 12 + 4 * 60, 470, 52 };
 static const Rect R_IP_AUTO = { M, HEAD + 10, 225, 56 };
 static const Rect R_IP_FIX  = { M + 235, HEAD + 10, 225, 56 };
 static Rect ipField(int i) { return { M + 160, HEAD + 86 + (i - 5) * 68, 310, 50 }; }
@@ -2028,6 +2161,7 @@ static void openSettings(int tab) {
   edVal[6] = ipMask;
   edVal[7] = ipGw;
   edVal[8] = ipDns;
+  edVal[9] = froniusHost2;
   edIpFixed = ipFixed;
   edPoll = pollMs;
   edAnim = animOn;
@@ -2316,21 +2450,23 @@ static void drawSettingsBody() {
   button(R_SAVE, "Speichern", false, C_BTN, C_ACC_GRN, true);
 
   if (edTab == 0) {
-    for (int i = 0; i <= 2; i++) {
-      Rect r = froField(i);
+    for (int row = 0; row < 4; row++) {
+      int i = FRO_FIELDS[row];
+      Rect r = froField(row);
       fitFont(FIELD_LABEL[i], r.x - M - 10, &fS, &fXS);
       text(FIELD_LABEL[i], M + 4, r.y + r.h / 2, i == edField ? C_ACC_GRN : C_DIM, ML_DATUM);
       drawField(r, i, i == edField);
     }
     button(R_TEST, "Verbindung testen", false);
     useFont(fXS);
-    int y = R_TEST.y + R_TEST.h + 22;
-    text("PV-Leistung: Vollausschlag des PV-Rings (z. B. 13.3)", M + 4, y, C_DIM, ML_DATUM);
+    int y = R_TEST.y + R_TEST.h + 20;
+    text("2. WR: zweiter Fronius ohne eigenen Smart Meter, sonst leer", M + 4, y, C_DIM, ML_DATUM);
+    text("PV-Leistung: Vollausschlag des PV-Rings (z. B. 13.3)", M + 4, y + 22, C_DIM, ML_DATUM);
     text(battCapReported() > 0 ? "Batterie: meldet " + fmt(battCapReported() / 1000.0f, 2) +
                                      " kWh – eigener Wert hat Vorrang"
                                : String("Batterie: nur nötig, wenn der Speicher nichts meldet"),
-         M + 4, y + 22, C_DIM, ML_DATUM);
-    text("Solar API am Wechselrichter einschalten!", M + 4, y + 44, C_DIM, ML_DATUM);
+         M + 4, y + 44, C_DIM, ML_DATUM);
+    text("Solar API am Wechselrichter einschalten!", M + 4, y + 66, C_DIM, ML_DATUM);
     drawPad();
   } else if (edTab == 1) {
     for (int i = 3; i <= 4; i++) {
@@ -2453,6 +2589,11 @@ static void saveSettings() {
   for (int i = 0; i < NF; i++) if (!isPassField(i)) edVal[i].trim();
   IPAddress hostIp;
   if (!parseIp(edVal[0], hostIp)) { edTab = 0; edField = 0; toast("IP des Wechselrichters fehlt oder ungültig", C_ACC_ORG); return; }
+  if (edVal[9].length()) {
+    IPAddress h2;
+    if (!parseIp(edVal[9], h2)) { edTab = 0; edField = 9; toast("IP des 2. Wechselrichters ungültig (oder leer lassen)", C_ACC_ORG); return; }
+    if (h2 == hostIp) { edTab = 0; edField = 9; toast("2. Wechselrichter: andere IP als der erste eintragen", C_ACC_ORG); return; }
+  }
   uint32_t pv, bat;
   if (!parseKilo(edVal[1], pv)) { edTab = 0; edField = 1; toast("PV-Leistung ungültig (z. B. 13.3)", C_ACC_ORG); return; }
   if (!parseKilo(edVal[2], bat)) { edTab = 0; edField = 2; toast("Batterie ungültig (z. B. 12.8)", C_ACC_ORG); return; }
@@ -2481,8 +2622,10 @@ static void saveSettings() {
                     (edIpFixed && (edVal[5] != ipAddr || edVal[6] != ipMask || edVal[7] != ipGw ||
                                    edVal[8] != ipDns));
   bool hostChanged = edVal[0] != froniusHost;
+  bool host2Changed = edVal[9] != froniusHost2;
   if (dataMx) xSemaphoreTake(dataMx, portMAX_DELAY);
   froniusHost = edVal[0];
+  froniusHost2 = edVal[9];
   if (dataMx) xSemaphoreGive(dataMx);
   pvMaxW = pv;
   battWh = bat;
@@ -2499,6 +2642,7 @@ static void saveSettings() {
 
   prefs.begin(NVS_NS, false);
   prefs.putString("host", froniusHost);
+  prefs.putString("host2", froniusHost2);
   prefs.putUInt("pvmax", pvMaxW);
   prefs.putUInt("battwh", battWh);
   prefs.putString("ssid", wifiSsid);
@@ -2529,6 +2673,12 @@ static void saveSettings() {
     battInfo = BattInfo();
     nextStorageFetch = 0;
     nextBattInfoFetch = 0;
+  }
+  if (host2Changed) {                   // zweiter WR neu/anders/entfernt: seinen Zaehler neu beginnen
+    inv2 = Inv2Data();
+    dayS.eInv2 = NAN;
+    nextInv2Fetch = 0;
+    daySave();
   }
 
   screen = SCR_FLOW;
@@ -2572,7 +2722,18 @@ static void testConnection() {
   if (ok) {
     String s = "Wechselrichter erreichbar – PV " + powerText(f.pPv);
     if (f.hasBatt && !isnan(f.soc)) s += ", Batterie " + String((int)lroundf(f.soc)) + " %";
-    toast(s, C_ACC_GRN, 8000);
+    String h2 = edVal[9];
+    h2.trim();
+    bool ok2 = true;
+    if (h2.length()) {
+      FlowData f2;
+      {
+        NetLock lock;
+        ok2 = readPowerFlow(h2, f2);
+      }
+      s += ok2 ? ", 2. WR " + powerText(f2.pInv) : String(" – 2. WR NICHT erreichbar");
+    }
+    toast(s, ok2 ? C_ACC_GRN : C_ACC_ORG, 10000);
   } else if (lastHttp == 404) {
     toast("Gerät antwortet, aber keine Solar API (HTTP 404) – Solar API einschalten?", C_ACC_ORG, 12000);
   } else if (lastHttp > 0) {
@@ -2611,7 +2772,7 @@ static void settingsTap(int x, int y) {
 
   if (edTab == 0 || (edTab == 2 && edIpFixed)) {
     if (edTab == 0) {
-      for (int i = 0; i <= 2; i++) if (hit(froField(i), x, y)) { edField = i; return; }
+      for (int row = 0; row < 4; row++) if (hit(froField(row), x, y)) { edField = FRO_FIELDS[row]; return; }
       if (hit(R_TEST, x, y)) { testConnection(); return; }
     }
     for (int i = 0; i < 12; i++) {
