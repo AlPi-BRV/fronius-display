@@ -93,6 +93,13 @@ des Wechselrichters eintragen, *Speichern*.
   die Ladung aus dem Netz nicht als Hausverbrauch, und die Autarkie wird ohne den Netzstrom für die
   Batterie gerechnet. Auf der Netz-Seite steht zusätzlich „davon in die Batterie“, auf der
   Verbraucher-Seite „davon direkt aus dem Netz“ (Netzbezug ohne die Ladung der Batterie)
+- **Ersatzstrom (Notstrom):** Meldet der Wechselrichter Ersatzstrombetrieb, steht oben rot
+  „ERSATZSTROM“, und statt „Heute“ zeigt die Startseite die Last je Phase mit Ampel
+  (grün / orange ab 80 % / rot ab der Grenze), den Ladestand und wie lange die Batterie bei der
+  jetzigen Last noch reicht. Die Netz-Seite zeigt dann Spannung, Strom und Leistung je Phase am
+  Wechselrichter. Grenze je Phase unter Einstellungen → Anzeige → Ersatzstrom (Standard 2,0 kW,
+  z. B. GEN24 6.0 ≈ 2 kW je Phase – Datenblatt des eigenen Wechselrichters beachten). Damit das
+  Display im Ernstfall läuft, müssen WLAN und Router mit Strom versorgt sein (Ersatzstromkreis oder USV)
 - **Störungen auf einen Blick:** Ist das WLAN weg, erscheint ein großes durchgestrichenes WLAN-Symbol,
   antwortet der Wechselrichter nicht, das durchgestrichene Wechselrichter-Symbol. Veraltete Werte werden
   so lange ausgeblendet. Das Display verbindet sich selbst neu – auch wenn der Router nach einem
@@ -107,7 +114,8 @@ des Wechselrichters eintragen, *Speichern*.
 
 Einbindung weiterer Geräte (Tasmota, Shelly, Lesekopf …), Wetter, Prognosen, Cloud-Dienste.
 Das Display spricht nur mit dem Fronius-Wechselrichter (auf Wunsch zusätzlich mit einem zweiten
-Fronius) – dafür ohne Server und ohne Internet für den Betrieb.
+Fronius) – dafür ohne Server und ohne Internet für den Betrieb. Das hilft gerade beim
+Stromausfall: Cloud und App sind dann oft weg, das Display zeigt weiter alles an.
 
 ## Wie die Tageswerte entstehen
 
@@ -173,7 +181,7 @@ Erscheint dort JSON, ist alles bereit.
 | Fronius | IP des Wechselrichters, IP eines zweiten Fronius (optional), PV-Leistung (kWp), Batterie (kWh), *Verbindung testen* |
 | WLAN | Netz suchen und wählen, WLAN-Passwort |
 | IP | Automatisch (DHCP) oder feste IP |
-| Anzeige | Ausrichtung (normal / 180° gedreht), Flussrichtung als Pfeile oder laufende Punkte, Netzladung der Batterie Nein/Ja |
+| Anzeige | Ausrichtung (normal / 180° gedreht), Flussrichtung als Pfeile oder laufende Punkte, Netzladung der Batterie Nein/Ja, Ersatzstrom: höchste Last je Phase |
 | System | Abfrageintervall (2 s bis 1 min), Update, Helligkeit & Kontrast, Nachtschaltung, Werkseinstellungen |
 
 ## Hardware

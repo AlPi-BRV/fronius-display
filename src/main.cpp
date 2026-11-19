@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.13"
+#define FW_VERSION  "0.1.14"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -190,6 +190,7 @@ static uint16_t nightFrom  = 22 * 60; // Beginn in Minuten nach Mitternacht
 static uint16_t nightTo    = 6 * 60;  // Ende
 static uint8_t  nightLvl   = 0;       // Index in NIGHT_LABEL (letzter Eintrag = aus)
 static bool     gridChg    = false;   // Batterie wird auch aus dem Netz geladen (z. B. Tibber)
+static uint16_t bkpLimW    = 2000;    // Ersatzstrom: hoechste Last je Phase in W (Ampel)
 static uint8_t  contrastLvl = CONTRAST_DEFAULT;
 static String   fwUpdatedFrom;
 
@@ -231,6 +232,8 @@ static void loadSettings() {
   nightTo    = prefs.getUShort("nightto", nightTo);
   nightLvl   = prefs.getUChar("nightlvl", 0);
   gridChg    = prefs.getBool("gridchg", false);
+  bkpLimW    = prefs.getUShort("bkplim", 2000);
+  if (bkpLimW < 500 || bkpLimW > 10000) bkpLimW = 2000;
   if (nightFrom >= 1440) nightFrom = 22 * 60;
   if (nightTo >= 1440) nightTo = 6 * 60;
   if (nightLvl > 2) nightLvl = 0;
@@ -268,6 +271,7 @@ struct FlowData {
   bool   hasBatt = false;
   String battMode;
   bool   battStandby = false;
+  bool   backup = false;          // Site.BackupMode: Ersatzstrom (Netz getrennt)
   double eInvTotal = NAN;          // Zaehler des Fronius-Wechselrichters in Wh
   float  pInv = NAN;               // AC-Leistung des Wechselrichters (< 0 = nimmt aus dem Netz auf)
   double eDay = NAN;               // Site.E_Day in Wh (nur SnapINverter/Datamanager, GEN24 liefert null)
@@ -311,6 +315,10 @@ struct BattInfo {
   double cPv = NAN;                // PV (DC), Summe aller Strings
   double cBattIn = NAN;            // Batterie geladen
   double cBattOut = NAN;           // Batterie entladen
+  // Ausgang des Wechselrichters je Phase (ACBRIDGE_...) – im Ersatzstrom = Last je Phase
+  float  phP[3] = { NAN, NAN, NAN };   // W
+  float  phA[3] = { NAN, NAN, NAN };   // A
+  float  phV[3] = { NAN, NAN, NAN };   // V
 };
 
 // Optionaler zweiter Fronius-Wechselrichter (eigene IP, z. B. zweiter GEN24 ohne Batterie).
@@ -775,6 +783,7 @@ static bool readPowerFlow(const String& host, FlowData& n) {
   n.pGrid = jd(site["P_Grid"]);
   n.pLoad = jd(site["P_Load"]);
   n.battStandby = site["BatteryStandby"].as<bool>();
+  n.backup = site["BackupMode"].as<bool>();
   n.eDay = jd(site["E_Day"]);
   n.eInvTotal = NAN;
   n.pInv = NAN;
@@ -893,15 +902,33 @@ static bool readBattInfo(const String& host, BattInfo& n) {
     return false;
   }
   // Schluessel ohne Anfuehrungszeichen: einige stehen im Typenschild als \"...\" (escaped)
-  enum { K_SOH, K_MINSOC, K_MAXSOC, K_CAP, K_PV1, K_PV2, K_PV3, K_PV4, K_BIN, K_BOUT, NK };
-  static const char* const KEYS[NK] = { "\"BAT_VALUE_STATE_OF_HEALTH_RELATIVE_U16\"", "min_soc", "max_soc",
-                                        "capacity_wh",
-                                        "PV_ENERGYACTIVE_ACTIVE_SUM_01\"", "PV_ENERGYACTIVE_ACTIVE_SUM_02\"",
-                                        "PV_ENERGYACTIVE_ACTIVE_SUM_03\"", "PV_ENERGYACTIVE_ACTIVE_SUM_04\"",
-                                        "BAT_ENERGYACTIVE_ACTIVECHARGE_SUM_01\"",
-                                        "BAT_ENERGYACTIVE_ACTIVEDISCHARGE_SUM_01\"" };
-  static size_t keyLen[NK] = { 0 };
-  if (!keyLen[0]) for (int k = 0; k < NK; k++) keyLen[k] = strlen(KEYS[k]);
+  enum { K_SOH, K_MINSOC, K_MAXSOC, K_CAP, K_PV1, K_PV2, K_PV3, K_PV4, K_BIN, K_BOUT,
+         K_P1, K_P2, K_P3, K_A1, K_A2, K_A3, K_V1, K_V2, K_V3, NK };
+  // Je nach Firmware heissen die Zaehler mit oder ohne Typ-Endung (_U64),
+  // z. B. PV_ENERGYACTIVE_ACTIVE_SUM_01 oder PV_ENERGYACTIVE_ACTIVE_SUM_01_U64.
+  struct Key { const char* s; uint8_t slot; };
+  static const Key KEYS[] = {
+    { "\"BAT_VALUE_STATE_OF_HEALTH_RELATIVE_U16\"", K_SOH }, { "min_soc", K_MINSOC }, { "max_soc", K_MAXSOC },
+    { "capacity_wh", K_CAP },
+    { "PV_ENERGYACTIVE_ACTIVE_SUM_01\"", K_PV1 }, { "PV_ENERGYACTIVE_ACTIVE_SUM_01_U64\"", K_PV1 },
+    { "PV_ENERGYACTIVE_ACTIVE_SUM_02\"", K_PV2 }, { "PV_ENERGYACTIVE_ACTIVE_SUM_02_U64\"", K_PV2 },
+    { "PV_ENERGYACTIVE_ACTIVE_SUM_03\"", K_PV3 }, { "PV_ENERGYACTIVE_ACTIVE_SUM_03_U64\"", K_PV3 },
+    { "PV_ENERGYACTIVE_ACTIVE_SUM_04\"", K_PV4 }, { "PV_ENERGYACTIVE_ACTIVE_SUM_04_U64\"", K_PV4 },
+    { "BAT_ENERGYACTIVE_ACTIVECHARGE_SUM_01\"", K_BIN }, { "BAT_ENERGYACTIVE_ACTIVECHARGE_SUM_01_U64\"", K_BIN },
+    { "BAT_ENERGYACTIVE_ACTIVEDISCHARGE_SUM_01\"", K_BOUT },
+    { "BAT_ENERGYACTIVE_ACTIVEDISCHARGE_SUM_01_U64\"", K_BOUT },
+    { "ACBRIDGE_POWERACTIVE_MEAN_01\"", K_P1 }, { "ACBRIDGE_POWERACTIVE_MEAN_01_F32\"", K_P1 },
+    { "ACBRIDGE_POWERACTIVE_MEAN_02\"", K_P2 }, { "ACBRIDGE_POWERACTIVE_MEAN_02_F32\"", K_P2 },
+    { "ACBRIDGE_POWERACTIVE_MEAN_03\"", K_P3 }, { "ACBRIDGE_POWERACTIVE_MEAN_03_F32\"", K_P3 },
+    { "ACBRIDGE_CURRENT_ACTIVE_MEAN_01\"", K_A1 }, { "ACBRIDGE_CURRENT_ACTIVE_MEAN_01_F32\"", K_A1 },
+    { "ACBRIDGE_CURRENT_ACTIVE_MEAN_02\"", K_A2 }, { "ACBRIDGE_CURRENT_ACTIVE_MEAN_02_F32\"", K_A2 },
+    { "ACBRIDGE_CURRENT_ACTIVE_MEAN_03\"", K_A3 }, { "ACBRIDGE_CURRENT_ACTIVE_MEAN_03_F32\"", K_A3 },
+    { "ACBRIDGE_VOLTAGE_MEAN_01\"", K_V1 }, { "ACBRIDGE_VOLTAGE_MEAN_01_F32\"", K_V1 },
+    { "ACBRIDGE_VOLTAGE_MEAN_02\"", K_V2 }, { "ACBRIDGE_VOLTAGE_MEAN_02_F32\"", K_V2 },
+    { "ACBRIDGE_VOLTAGE_MEAN_03\"", K_V3 }, { "ACBRIDGE_VOLTAGE_MEAN_03_F32\"", K_V3 } };
+  static const int NKEYS = sizeof(KEYS) / sizeof(KEYS[0]);
+  static size_t keyLen[NKEYS] = { 0 };
+  if (!keyLen[0]) for (int k = 0; k < NKEYS; k++) keyLen[k] = strlen(KEYS[k].s);
   double val[NK];
   for (int k = 0; k < NK; k++) val[k] = NAN;
   char win[48];
@@ -934,9 +961,9 @@ static bool readBattInfo(const String& host, BattInfo& n) {
     if (wl == sizeof(win)) { memmove(win, win + 1, sizeof(win) - 1); wl--; }
     win[wl++] = c;
     if (c != '"' && c != 'h' && c != 'c' && c != '6') continue;   // alle Schluessel enden auf eines davon
-    for (int k = 0; k < NK; k++) {
+    for (int k = 0; k < NKEYS; k++) {
       size_t kl = keyLen[k];
-      if (wl >= kl && memcmp(win + wl - kl, KEYS[k], kl) == 0) { want = k; nl = 0; break; }
+      if (wl >= kl && memcmp(win + wl - kl, KEYS[k].s, kl) == 0) { want = KEYS[k].slot; nl = 0; break; }
     }
   }
   http.end();
@@ -952,10 +979,15 @@ static bool readBattInfo(const String& host, BattInfo& n) {
   n.cPv = pv;
   n.cBattIn  = isnan(val[K_BIN])  ? NAN : val[K_BIN] / 3600.0;
   n.cBattOut = isnan(val[K_BOUT]) ? NAN : val[K_BOUT] / 3600.0;
+  for (int i = 0; i < 3; i++) {
+    n.phP[i] = val[K_P1 + i];
+    n.phA[i] = val[K_A1 + i];
+    n.phV[i] = val[K_V1 + i];
+  }
   Serial.printf("Speicher-Typenschild: %.0f Wh, SOC min %.0f / max %.0f %%, SOH %.0f %%\n", n.capWh, n.minSoc,
                 n.maxSoc, n.soh);
   Serial.printf("Zaehler WR: PV %.0f Wh, Batterie geladen %.0f / entladen %.0f Wh\n", n.cPv, n.cBattIn, n.cBattOut);
-  return n.valid || !isnan(n.cPv) || !isnan(n.cBattIn);
+  return n.valid || !isnan(n.cPv) || !isnan(n.cBattIn) || !isnan(n.phP[0]);
 }
 
 // ---------------------------------------------------------------
@@ -1017,9 +1049,13 @@ static void fetchAll(const String& host, PollResult& r) {
   }
   // Typenschild und Zaehler des Wechselrichters – jede Minute, ohne Antwort stuendlich
   // (die Seite gibt es nur beim GEN24)
+  // Im Ersatzstrom alle 10 s (Last je Phase), beim Wechsel in den Ersatzstrom sofort
+  static bool wasBackup = false;
+  if (r.f.backup && !wasBackup) nextBattInfoFetch = 0;
+  wasBackup = r.f.backup;
   if (millis() >= nextBattInfoFetch) {
     r.binfOk = readBattInfo(host, r.bi);
-    nextBattInfoFetch = millis() + (r.binfOk ? 60000UL : 60UL * 60000UL);
+    nextBattInfoFetch = millis() + (r.binfOk ? (r.f.backup ? 10000UL : 60000UL) : 60UL * 60000UL);
   }
   // zweiter Fronius: Leistung und Zaehler; antwortet er nicht, erst nach 1 min wieder
   String h2 = host2Copy();
@@ -1682,8 +1718,69 @@ static void drawFlow() {
   }
 }
 
+// Ersatzstrom: Ampel fuer die Last je Phase (gruen bis 80 %, orange bis 100 %, darueber rot)
+static uint16_t phaseColor(float w) {
+  if (isnan(w)) return C_TEXT;
+  float f = fabsf(w) / (float)bkpLimW;
+  return f >= 1.0f ? C_ACC_RED : (f >= 0.8f ? C_ACC_ORG : C_ACC_GRN);
+}
+static bool phasesKnown() { return !isnan(battInfo.phP[0]) && !isnan(battInfo.phP[1]) && !isnan(battInfo.phP[2]); }
+
+// Im Ersatzstrom ersetzt dieser Kasten "Heute": Last je Phase am Wechselrichter und
+// wie lange die Batterie bei der jetzigen Last noch reicht.
+static void drawBackupPanel() {
+  const Rect& r = R_TODAY;
+  canvas.fillSmoothRoundRect(r.x, r.y, r.w, r.h, 14, mix565(C_TILE, C_ACC_RED, 0.18f));
+  useFont(fT);
+  text("Ersatzstrom", r.x + 16, r.y + 24, C_ACC_RED, ML_DATUM);
+  useFont(fXS);
+  text("Netz getrennt", r.x + r.w - 16, r.y + 26, C_DIM, MR_DATUM);
+  useFont(fS);
+  text("Last je Phase", r.x + 16, r.y + 64, C_DIM, ML_DATUM);
+  int y = r.y + 104;
+  if (phasesKnown()) {
+    for (int i = 0; i < 3; i++) {
+      float w = fabsf(battInfo.phP[i]);
+      uint16_t col = phaseColor(w);
+      useFont(fS);
+      text("L" + String(i + 1), r.x + 16, y, C_TEXT, ML_DATUM);
+      String n, u;
+      powerParts(w, n, u);
+      numUnit(n, u, r.x + r.w - 16, y + 9, 1, fT, fXS, col);
+      int bw = r.w - 32, bx = r.x + 16, by = y + 20;
+      float f = fminf(w / (float)bkpLimW, 1.0f);
+      canvas.fillSmoothRoundRect(bx, by, bw, 10, 5, mix565(C_TILE, col, 0.25f));
+      if (f > 0.02f) canvas.fillSmoothRoundRect(bx, by, (int)(bw * f) < 10 ? 10 : (int)(bw * f), 10, 5, col);
+      y += 58;
+    }
+    useFont(fXS);
+    text("Grenze je Phase: " + fmt(bkpLimW / 1000.0f, 1) + " kW", r.x + 16, y - 6, C_DIM, ML_DATUM);
+  } else {
+    useFont(fS);
+    text("keine Werte je Phase", r.x + 16, y, C_DIM, ML_DATUM);
+    y += 52;
+    String n, u;
+    powerParts(loadW(), n, u);
+    text("Verbrauch", r.x + 16, y, C_DIM, ML_DATUM);
+    numUnit(n, u, r.x + r.w - 16, y + 9, 1, fT, fXS, C_TEXT);
+    y += 110;
+  }
+  y += 34;
+  useFont(fS);
+  text("Batterie", r.x + 16, y, C_DIM, ML_DATUM);
+  numUnit(isnan(flow.soc) ? String("--") : fmt(flow.soc, 0), "%", r.x + r.w - 16, y + 9, 1, fT, fXS, C_ACC_GRN);
+  y += 44;
+  String d;
+  if (battCapWh() > 0 && !isnan(flow.pAkku) && flow.pAkku >= 100) d = dauerText(battAvailWh(flow.soc) / flow.pAkku);
+  useFont(fS);
+  text("Reicht noch ca.", r.x + 16, y, C_DIM, ML_DATUM);
+  useFont(fT);
+  text(d.length() ? d : String("--"), r.x + r.w - 16, y, C_TEXT, MR_DATUM);
+}
+
 static void drawTodayPanel() {
   const Rect& r = R_TODAY;
+  if (flow.valid && flow.backup) { drawBackupPanel(); return; }
   canvas.fillSmoothRoundRect(r.x, r.y, r.w, r.h, 14, C_TILE);
   useFont(fT);
   text("Heute", r.x + 16, r.y + 24, C_SUN, ML_DATUM);
@@ -1754,7 +1851,10 @@ static void drawFlowHeader() {
     text("Wechselrichter nicht erreichbar", xr, HEAD / 2, C_ACC_ORG, MR_DATUM);
   } else {
     text(uz, xr, HEAD / 2, C_DIM, MR_DATUM);
-    if (updateVersion.length()) {
+    if (flow.valid && flow.backup) {
+      int w = canvas.textWidth(uz);
+      text("ERSATZSTROM", xr - w - 20, HEAD / 2, C_ACC_RED, MR_DATUM);
+    } else if (updateVersion.length()) {
       int w = canvas.textWidth(uz);
       useFont(fS);
       text("Update " + updateVersion + " verfügbar", xr - w - 20, HEAD / 2, C_ACC_ORG, MR_DATUM);
@@ -1882,8 +1982,10 @@ static void drawDetailLoad() {
 }
 
 static void drawDetailGrid() {
-  // links: Phasen als Tabelle
-  boxTitle(R_DL, "Phasen", C_TEXT);
+  // links: Phasen als Tabelle – im Ersatzstrom die Werte des Wechselrichters (Last je Phase)
+  bool bkp = flow.valid && flow.backup;
+  bool ok = bkp ? phasesKnown() : meter.valid;
+  boxTitle(R_DL, bkp ? "Ersatzstrom" : "Phasen", bkp ? C_ACC_RED : C_TEXT);
   const int c0 = R_DL.x + 18, cw = (R_DL.w - 36 - 70) / 3;
   useFont(fS);
   for (int i = 0; i < 3; i++) text("L" + String(i + 1), c0 + 70 + cw * i + cw - 6, R_DL.y + 70, C_DIM, MR_DATUM);
@@ -1893,19 +1995,28 @@ static void drawDetailGrid() {
     useFont(fS);
     text(rowName[r], c0, y, C_DIM, ML_DATUM);
     for (int i = 0; i < 3; i++) {
-      float v = r == 0 ? meter.v[i] : (r == 1 ? meter.a[i] : meter.p[i]);
-      String s = !meter.valid ? String("--") : (r == 0 ? fmt(v, 0) : (r == 1 ? fmt(fabsf(v), 1) : fmt(fabsf(v), 0)));
+      float v = bkp ? (r == 0 ? battInfo.phV[i] : (r == 1 ? battInfo.phA[i] : battInfo.phP[i]))
+                    : (r == 0 ? meter.v[i] : (r == 1 ? meter.a[i] : meter.p[i]));
+      String s = !ok || isnan(v) ? String("--") : (r == 0 ? fmt(v, 0) : (r == 1 ? fmt(fabsf(v), 1) : fmt(fabsf(v), 0)));
       uint16_t col = C_TEXT;
-      if (r == 2 && meter.valid && !isnan(v)) col = v > 5 ? C_ACC_ORG : (v < -5 ? C_ACC_GRN : C_TEXT);
+      if (r == 2 && ok && !isnan(v)) {
+        if (bkp) col = phaseColor(v);
+        else col = v > 5 ? C_ACC_ORG : (v < -5 ? C_ACC_GRN : C_TEXT);
+      }
       useFont(fT);
       text(s, c0 + 70 + cw * i + cw - 6, y, col, MR_DATUM);
     }
   }
   int y = R_DL.y + 116 + 3 * 52 + 6;
   useFont(fXS);
-  text("Leistung: orange = Bezug, grün = Einspeisung", c0, y, C_DIM, ML_DATUM);
-  y += 40;
-  y = detailRow(R_DL, y, "Frequenz", meter.valid ? fmt(meter.freq, 2) : String("--"), "Hz");
+  if (bkp) {
+    text("Wechselrichter, Grenze je Phase " + fmt(bkpLimW / 1000.0f, 1) + " kW", c0, y, C_DIM, ML_DATUM);
+    text("grün / orange ab 80 % / rot ab 100 %", c0, y + 22, C_DIM, ML_DATUM);
+  } else {
+    text("Leistung: orange = Bezug, grün = Einspeisung", c0, y, C_DIM, ML_DATUM);
+    y += 40;
+    y = detailRow(R_DL, y, "Frequenz", meter.valid ? fmt(meter.freq, 2) : String("--"), "Hz");
+  }
 
   boxTitle(R_DR, "Netz", C_TEXT);
   y = R_DR.y + 76;
@@ -1998,6 +2109,7 @@ static bool     edIpFixed = false;
 static uint32_t edPoll = 5000;
 static bool     edAnim = true;
 static bool     edGridChg = false;
+static uint16_t edBkpLim = 2000;
 static bool     picPage = false;
 static bool     nightPage = false;
 enum KbLayer { KB_LOWER, KB_UPPER, KB_SYM };
@@ -2053,7 +2165,7 @@ static const char* const PAD_KEYS[12] = { "1", "2", "3", "4", "5", "6", "7", "8"
 static Rect padKey(int i) { return { PAD_X + (i % 3) * (PAD_W + 8), PAD_Y + (i / 3) * (PAD_H + 8), PAD_W, PAD_H }; }
 
 // Reiter Anzeige
-static Rect optBtn(int row, int col) { return { 250 + col * 190, HEAD + 22 + row * 110, 180, 60 }; }
+static Rect optBtn(int row, int col) { return { 250 + col * 190, HEAD + 18 + row * 92, 180, 60 }; }
 
 // Reiter System
 static Rect pollBtn(int i) { return { 250 + i * 108, HEAD + 22, 100, 60 }; }
@@ -2166,6 +2278,7 @@ static void openSettings(int tab) {
   edPoll = pollMs;
   edAnim = animOn;
   edGridChg = gridChg;
+  edBkpLim = bkpLimW;
   picPage = false;
   nightPage = false;
   edTab = tab;
@@ -2526,6 +2639,15 @@ static void drawSettingsBody() {
     text("aus dem Netz", M + 6, optBtn(2, 0).y + 64, C_DIM, ML_DATUM);
     button(optBtn(2, 0), "Nein", !edGridChg);
     button(optBtn(2, 1), "Ja", edGridChg);
+    useFont(fT);
+    text("Ersatzstrom", M + 6, optBtn(3, 0).y + 16, C_TEXT, ML_DATUM);
+    useFont(fXS);
+    text("höchste Last je Phase", M + 6, optBtn(3, 0).y + 44, C_DIM, ML_DATUM);
+    button(optBtn(3, 0), "-", false);
+    button(optBtn(3, 1), "+", false);
+    useFont(fT);
+    text(fmt(edBkpLim / 1000.0f, 1) + " kW", optBtn(3, 1).x + optBtn(3, 1).w + 10 + 0, optBtn(3, 0).y + 30, C_ACC_GRN,
+         ML_DATUM);
     useFont(fXS);
     text("Ausrichtung gilt sofort – Netzladung zählt bei Ja nicht als Verbrauch", M + 6,
          480 - M - 10, C_DIM, BL_DATUM);
@@ -2639,6 +2761,7 @@ static void saveSettings() {
   pollMs = edPoll;
   animOn = edAnim;
   gridChg = edGridChg;
+  bkpLimW = edBkpLim;
 
   prefs.begin(NVS_NS, false);
   prefs.putString("host", froniusHost);
@@ -2655,6 +2778,7 @@ static void saveSettings() {
   prefs.putUInt("poll", pollMs);
   prefs.putBool("anim2", animOn);
   prefs.putBool("gridchg", gridChg);
+  prefs.putUShort("bkplim", bkpLimW);
   prefs.end();
   Serial.printf("Einstellungen gespeichert: Fronius %s, WLAN %s, IP %s\n", froniusHost.c_str(),
                 wifiSsid.c_str(), ipFixed ? ipAddr.c_str() : "DHCP");
@@ -2821,6 +2945,8 @@ static void settingsTap(int x, int y) {
     if (hit(optBtn(1, 1), x, y)) { edAnim = true; return; }
     if (hit(optBtn(2, 0), x, y)) { edGridChg = false; return; }
     if (hit(optBtn(2, 1), x, y)) { edGridChg = true; return; }
+    if (hit(optBtn(3, 0), x, y)) { if (edBkpLim > 500) edBkpLim -= 250; return; }
+    if (hit(optBtn(3, 1), x, y)) { if (edBkpLim < 6000) edBkpLim += 250; return; }
   } else if (edTab == 4) {
     for (int i = 0; i < 5; i++) if (hit(pollBtn(i), x, y)) { edPoll = POLL_CHOICES[i]; return; }
     if (hit(R_PIC, x, y)) { picPage = true; return; }
