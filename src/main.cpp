@@ -29,7 +29,7 @@
 #include "display_rgb.h"
 #include "fonts.h"
 
-#define FW_VERSION  "0.1.14"
+#define FW_VERSION  "0.1.15"
 
 // Board-Kennung: steckt in jedem Dateinamen des Releases. Die Update-Suche
 // nimmt NUR Dateien mit der eigenen Kennung, damit ein 5" nie die 7"-Firmware
@@ -618,7 +618,7 @@ static bool     dimmed = false;
 static int      appliedDuty = -1;    // zuletzt gesetzte Helligkeit (-1 = neu setzen)
 static bool     needRedraw = true;
 
-enum Action { A_NONE, A_FACTORY, A_OTA };
+enum Action { A_NONE, A_FACTORY, A_OTA, A_DAYRESET };
 static Action   confirmAct = A_NONE;
 static String   confirmL1, confirmL2;
 
@@ -2172,7 +2172,8 @@ static Rect pollBtn(int i) { return { 250 + i * 108, HEAD + 22, 100, 60 }; }
 static const Rect R_UPD     = { 250, HEAD + 112, 540, 60 };
 static const Rect R_PIC     = { 250, HEAD + 202, 265, 60 };
 static const Rect R_NIGHT   = { 525, HEAD + 202, 265, 60 };
-static const Rect R_FACT    = { 250, HEAD + 292, 300, 60 };
+static const Rect R_FACT    = { 250, HEAD + 292, 265, 60 };
+static const Rect R_DAYRST  = { 525, HEAD + 292, 265, 60 };
 
 // Unterseite Helligkeit & Kontrast
 static const int PIC_RAMP_Y = HEAD + 10, PIC_RAMP_H = 26, PIC_RAMP_G = 6, PIC_STEP = 24, PIC_X0 = 16;
@@ -2671,6 +2672,7 @@ static void drawSettingsBody() {
     useFont(fT);
     text("Zurücksetzen", M + 6, R_FACT.y + 30, C_TEXT, ML_DATUM);
     button(R_FACT, "Werkseinstellungen", false, C_BTN_RED);
+    button(R_DAYRST, "Tageswerte", false, C_BTN_RED);
     String info = WiFi.status() == WL_CONNECTED
                     ? "Display-IP " + WiFi.localIP().toString() + "   WLAN " + WiFi.SSID() + "   " +
                         String(WiFi.RSSI()) + " dBm"
@@ -2967,6 +2969,10 @@ static void settingsTap(int x, int y) {
       askConfirm(A_FACTORY, "Alle Einstellungen löschen?", "WLAN und Wechselrichter müssen neu eingerichtet werden.");
       return;
     }
+    if (hit(R_DAYRST, x, y)) {
+      askConfirm(A_DAYRESET, "Tageswerte von heute löschen?", "Einstellungen bleiben – gezählt wird ab jetzt neu.");
+      return;
+    }
   }
 }
 
@@ -3038,6 +3044,13 @@ static void runAction(Action a) {
       showMessage("Werkseinstellungen – Neustart ...");
       delay(1200);
       ESP.restart();
+      break;
+    case A_DAYRESET:                    // nur die Tageswerte, Einstellungen bleiben
+      dayS = DayStore();                 // naechste Abfrage beginnt den Tag ab jetzt neu
+      lastIntegMs = 0;
+      daySave();
+      today = Today();
+      toast("Tageswerte gelöscht – Zählung ab jetzt", C_ACC_GRN, 6000);
       break;
     default: break;
   }

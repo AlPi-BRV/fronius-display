@@ -182,7 +182,7 @@ Erscheint dort JSON, ist alles bereit.
 | WLAN | Netz suchen und wählen, WLAN-Passwort |
 | IP | Automatisch (DHCP) oder feste IP |
 | Anzeige | Ausrichtung (normal / 180° gedreht), Flussrichtung als Pfeile oder laufende Punkte, Netzladung der Batterie Nein/Ja, Ersatzstrom: höchste Last je Phase |
-| System | Abfrageintervall (2 s bis 1 min), Update, Helligkeit & Kontrast, Nachtschaltung, Werkseinstellungen |
+| System | Abfrageintervall (2 s bis 1 min), Update, Helligkeit & Kontrast, Nachtschaltung, Werkseinstellungen, *Tageswerte* zurücksetzen (nur die Werte von heute, Einstellungen bleiben) |
 
 ## Hardware
 
